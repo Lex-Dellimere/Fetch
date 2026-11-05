@@ -1,0 +1,104 @@
+// The client with a cookie jar: cookies are stored from responses, including
+// redirects, and sent back to the right host, path and scheme.
+import "http/http";
+import "server";
+import "tutil";
+import "std/http";
+import "std/arena";
+import "std/core";
+
+fn page(r: SrvReq*) -> int32 {
+  var t: string = r->target;
+  if (t == "/set") {
+    srv_reply(r, 200, "Set-Cookie: a=1\r\nSet-Cookie: b=2; Path=/api; HttpOnly\r\n", "set");
+  } else if (t == "/echo" || t == "/api/echo" || t == "/other/echo") {
+    srv_reply(r, 200, "", srv_header(r, "Cookie"));
+  } else if (t == "/clear") {
+    srv_reply(r, 200, "Set-Cookie: a=; Max-Age=0\r\n", "cleared");
+  } else if (t == "/short") {
+    srv_reply(r, 200, "Set-Cookie: short=1; Max-Age=10\r\nSet-Cookie: dated=1; Expires=Tue, 14 Nov 2023 22:14:30 GMT\r\n", "short");
+  } else if (t == "/hop") {
+    srv_reply(r, 302, "Set-Cookie: hop=1\r\nLocation: /echo\r\n", "moved");
+  } else if (t == "/bad") {
+    srv_reply(r, 200, "Set-Cookie: tld=1; Domain=com\r\nSet-Cookie: sec=1; Secure\r\nSet-Cookie: other=1; Domain=example.org\r\nSet-Cookie: ok=1; Domain=127.0.0.1\r\nSet-Cookie: junk\r\n", "bad");
+  } else if (t == "/cross") {
+    srv_reply(r, 302, "Location: http://localhost:{srv_port()}/echo\r\n", "moved");
+  } else {
+    srv_reply(r, 404, "", "no");
+  }
+  return 0;
+}
+
+fn body_of(r: Result<HttpReply*, string>) -> string {
+  match (r) {
+    case Ok(x): { return "" + x->body; }
+    case Err(e): { return "ERR:" + e; }
+  }
+}
+
+fn main() -> int32 {
+  srv_start(&page);
+  var a: Arena* = arena_init((int64)0);
+  var jar: HttpCookieJar;
+  http_cookie_jar_init(&jar);
+  jar.now = 1700000000;
+  var c: HttpClient;
+  http_client_init(&c);
+  c.jar = &jar;
+
+  t_str("nothing yet", body_of(http_client_get(&c, a, srv_url(a, "/echo"))), "");
+  http_client_get(&c, a, srv_url(a, "/set"));
+  t_eq("two cookies stored", (int64)http_cookie_jar_count(&jar), 2);
+  t_str("sent back on /", body_of(http_client_get(&c, a, srv_url(a, "/echo"))), "a=1");
+  t_str("path match", body_of(http_client_get(&c, a, srv_url(a, "/api/echo"))), "b=2; a=1");
+  t_str("path mismatch", body_of(http_client_get(&c, a, srv_url(a, "/other/echo"))), "a=1");
+  var hc: HttpCookie* = http_cookie_jar_find(&jar, "b", "127.0.0.1", "/api");
+  t_ok("HttpOnly kept", hc != (HttpCookie*)0 && hc->http_only == 1);
+
+  // a Cookie header of your own replaces the jar's for that request
+  var own: HttpHeader[1];
+  own[0].name = "Cookie";
+  own[0].value = "mine=1";
+  var r: Result<HttpReply*, string> = http_client_request(&c, a, "GET", srv_url(a, "/echo"), &own[0], 1, "");
+  t_str("own Cookie header", body_of(r), "mine=1");
+
+  // deleting
+  http_client_get(&c, a, srv_url(a, "/clear"));
+  t_eq("deleted", (int64)http_cookie_jar_count(&jar), 1);
+  t_str("gone", body_of(http_client_get(&c, a, srv_url(a, "/echo"))), "");
+
+  // expiry, with the jar's clock
+  http_client_get(&c, a, srv_url(a, "/short"));
+  t_str("fresh", body_of(http_client_get(&c, a, srv_url(a, "/echo"))), "short=1; dated=1");
+  jar.now = 1700000009;
+  t_str("9 seconds", body_of(http_client_get(&c, a, srv_url(a, "/echo"))), "short=1; dated=1");
+  jar.now = 1700000010;
+  t_str("10 seconds", body_of(http_client_get(&c, a, srv_url(a, "/echo"))), "dated=1");
+  jar.now = 1700086400;
+  t_str("after the Expires date", body_of(http_client_get(&c, a, srv_url(a, "/echo"))), "");
+
+  // cookies from a redirect response go with the next hop
+  t_str("set on a redirect", body_of(http_client_get(&c, a, srv_url(a, "/hop"))), "hop=1");
+
+  // refused cookies
+  http_cookie_jar_clear(&jar);
+  http_client_get(&c, a, srv_url(a, "/bad"));
+  t_eq("only the good one", (int64)http_cookie_jar_count(&jar), 1);
+  t_str("ok=1", body_of(http_client_get(&c, a, srv_url(a, "/echo"))), "ok=1");
+
+  // a cookie of one host is not sent to another
+  http_cookie_jar_clear(&jar);
+  http_client_get(&c, a, srv_url(a, "/set"));
+  t_str("other host gets nothing", body_of(http_client_get(&c, a, srv_url(a, "/cross"))), "");
+
+  // without a jar nothing is stored or sent
+  var plain: HttpClient;
+  http_client_init(&plain);
+  http_client_get(&plain, a, srv_url(a, "/set"));
+  t_str("no jar", body_of(http_client_get(&plain, a, srv_url(a, "/echo"))), "");
+  http_client_free(&plain);
+
+  http_client_free(&c);
+  http_cookie_jar_free(&jar);
+  return t_done("cookie_client");
+}

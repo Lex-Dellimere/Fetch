@@ -1,0 +1,157 @@
+// gzip and deflate bodies from a loopback server, packed with Press.
+import "http/http";
+import "press/press";
+import "server";
+import "tutil";
+import "std/http";
+import "std/arena";
+import "std/core";
+import "std/mem";
+import "std/strbuf";
+
+const TEXT: string = "the quick brown fox jumps over the lazy dog, again and again and again";
+
+var g_gzip: PressBuf;
+var g_zlib: PressBuf;
+var g_raw: PressBuf;
+var g_bomb: PressBuf;
+var g_junk: string = "this is not gzip data at all";
+
+fn view(b: PressBuf*) -> string {
+  var s: string;
+  s.chars = b->data;
+  s.length = (uint64)b->len;
+  return s;
+}
+
+fn hex_line(n: int64) -> string {
+  var a: Arena* = arena_init((int64)0);
+  var sb: StrBuf* = strbuf_new(a, 16);
+  strbuf_append_hex(sb, (uint64)n);
+  strbuf_append_string(sb, "\r\n");
+  var out: string = "" + strbuf_finish_string(sb);
+  arena_free(a);
+  return out;
+}
+
+fn page(r: SrvReq*) -> int32 {
+  var t: string = r->target;
+  if (t == "/gzip") {
+    srv_reply(r, 200, "Content-Encoding: gzip\r\n", view(&g_gzip));
+  } else if (t == "/xgzip") {
+    srv_reply(r, 200, "Content-Encoding: X-GZIP\r\n", view(&g_gzip));
+  } else if (t == "/zlib") {
+    srv_reply(r, 200, "Content-Encoding: deflate\r\n", view(&g_zlib));
+  } else if (t == "/raw") {
+    srv_reply(r, 200, "Content-Encoding: deflate\r\n", view(&g_raw));
+  } else if (t == "/bomb") {
+    srv_reply(r, 200, "Content-Encoding: gzip\r\n", view(&g_bomb));
+  } else if (t == "/junk") {
+    srv_reply(r, 200, "Content-Encoding: gzip\r\n", g_junk);
+  } else if (t == "/br") {
+    srv_reply(r, 200, "Content-Encoding: br\r\n", "brotli bytes");
+  } else if (t == "/identity") {
+    srv_reply(r, 200, "Content-Encoding: identity\r\n", TEXT);
+  } else if (t == "/plain") {
+    srv_reply(r, 200, "", TEXT);
+  } else if (t == "/empty") {
+    srv_reply(r, 204, "Content-Encoding: gzip\r\n", "");
+  } else if (t == "/chunked") {
+    var z: string = view(&g_gzip);
+    srv_send_raw(r->fd, "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n");
+    var half: int64 = (int64)z.length / 2;
+    srv_send_raw(r->fd, hex_line(half));
+    srv_send_raw(r->fd, str_view(z, 0, half));
+    srv_send_raw(r->fd, "\r\n");
+    srv_send_raw(r->fd, hex_line((int64)z.length - half));
+    srv_send_raw(r->fd, str_view(z, half, (int64)z.length - half));
+    srv_send_raw(r->fd, "\r\n0\r\n\r\n");
+  } else {
+    srv_reply(r, 404, "", "no");
+  }
+  return 0;
+}
+
+fn str_view(s: string, from: int64, n: int64) -> string {
+  var o: string;
+  o.chars = s.chars + from;
+  o.length = (uint64)n;
+  return o;
+}
+
+fn body_of(r: Result<HttpReply*, string>) -> string {
+  match (r) {
+    case Ok(x): { return "" + x->body; }
+    case Err(e): { return "ERR:" + e; }
+  }
+}
+
+fn reply_of(r: Result<HttpReply*, string>) -> HttpReply* {
+  match (r) {
+    case Ok(x): { return x; }
+    case Err(e): { return (HttpReply*)0; }
+  }
+}
+
+fn main() -> int32 {
+  press_gzip_compress(TEXT.chars, (int64)TEXT.length, 6, &g_gzip);
+  press_zlib_compress(TEXT.chars, (int64)TEXT.length, 6, &g_zlib);
+  press_deflate_compress(TEXT.chars, (int64)TEXT.length, 6, &g_raw);
+  var zeros: uint8* = (uint8*)calloc(1, 4194304);
+  press_gzip_compress(zeros, 4194304, 9, &g_bomb);
+  free(zeros);
+  t_ok("bomb is small", g_bomb.len < 8192);
+
+  srv_start(&page);
+  var a: Arena* = arena_init((int64)0);
+  var c: HttpClient;
+  http_client_init(&c);
+
+  var n0: int32 = srv_requests();
+  var r: HttpReply* = reply_of(http_client_get(&c, a, srv_url(a, "/gzip")));
+  t_ok("gzip", r != (HttpReply*)0 && r->body == TEXT);
+  t_str("asked for it", srv_log_header(n0, "Accept-Encoding"), "gzip, deflate");
+  t_ok("headers describe the decoded body", http_header_find(r->headers, r->nheaders, "content-encoding", 0) < 0 && http_header_find(r->headers, r->nheaders, "content-length", 0) < 0);
+  t_str("x-gzip", body_of(http_client_get(&c, a, srv_url(a, "/xgzip"))), TEXT);
+  t_str("deflate with zlib framing", body_of(http_client_get(&c, a, srv_url(a, "/zlib"))), TEXT);
+  t_str("deflate without framing", body_of(http_client_get(&c, a, srv_url(a, "/raw"))), TEXT);
+  t_str("chunked gzip", body_of(http_client_get(&c, a, srv_url(a, "/chunked"))), TEXT);
+  t_str("identity", body_of(http_client_get(&c, a, srv_url(a, "/identity"))), TEXT);
+  t_str("not encoded", body_of(http_client_get(&c, a, srv_url(a, "/plain"))), TEXT);
+  t_str("unknown coding is left alone", body_of(http_client_get(&c, a, srv_url(a, "/br"))), "brotli bytes");
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/empty")));
+  t_ok("empty body", r != (HttpReply*)0 && r->status == 204 && r->body.length == 0);
+  t_str("bad data", body_of(http_client_get(&c, a, srv_url(a, "/junk"))), "ERR:bad gzip or deflate data");
+
+  // a small body that grows past the limit when decoded
+  c.max_body = 65536;
+  t_str("bomb", body_of(http_client_get(&c, a, srv_url(a, "/bomb"))), "ERR:body too large");
+  c.max_body = 8388608;
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/bomb")));
+  t_ok("same body under a larger limit", r != (HttpReply*)0 && r->body.length == 4194304);
+  c.max_body = HTTP_CLIENT_MAX_BODY;
+  t_str("the connection still works", body_of(http_client_get(&c, a, srv_url(a, "/gzip"))), TEXT);
+
+  // switched off
+  c.decompress = 0;
+  n0 = srv_requests();
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/gzip")));
+  t_ok("raw gzip bytes", r != (HttpReply*)0 && r->body.length == (uint64)g_gzip.len && r->body != TEXT);
+  t_str("no Accept-Encoding", srv_log_header(n0, "Accept-Encoding"), "");
+  t_ok("Content-Encoding kept", r != (HttpReply*)0 && http_header_find(r->headers, r->nheaders, "content-encoding", 0) >= 0);
+  c.decompress = 1;
+
+  // a header of your own turns decoding off for that request
+  var own: HttpHeader[1];
+  own[0].name = "Accept-Encoding";
+  own[0].value = "gzip";
+  r = reply_of(http_client_request(&c, a, "GET", srv_url(a, "/gzip"), &own[0], 1, ""));
+  t_ok("own Accept-Encoding", r != (HttpReply*)0 && r->body.length == (uint64)g_gzip.len);
+
+  http_client_free(&c);
+  press_buf_free(&g_gzip);
+  press_buf_free(&g_zlib);
+  press_buf_free(&g_raw);
+  press_buf_free(&g_bomb);
+  return t_done("gzip");
+}

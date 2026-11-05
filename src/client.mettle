@@ -166,6 +166,7 @@ struct HcIo {
   rbuf: uint8*;
   rcap: int64;
   rlen: int64;
+  cbuf: uint8*;         // chunk input after the first read, so the head in rbuf survives
   body: uint8*;
   bcap: int64;
   blen: int64;
@@ -266,8 +267,12 @@ fn hc_read_response(c: HttpClient*, s: HttpStream*, io: HcIo*, is_head: bool, de
         }
       }
       if (!done) {
-        src = io->rbuf;
-        var n3: int64 = hc_fill(s, io, io->rbuf, io->rcap, deadline);
+        if (io->cbuf == 0) {
+          io->cbuf = (uint8*)malloc(16384);
+          if (io->cbuf == 0) { return HTTP_ERR_NOMEM; }
+        }
+        src = io->cbuf;
+        var n3: int64 = hc_fill(s, io, io->cbuf, 16384, deadline);
         if (n3 < 0) { return n3; }
         if (n3 == 0) { return HTTP_ERR_CLOSED; }
         avail = n3;
@@ -533,6 +538,7 @@ fn hc_hop(c: HttpClient*, arena: Arena*, verb: string, u: HttpUrl*, headers: Htt
       }
     }
     if (io.rbuf != 0) { free(io.rbuf); }
+    if (io.cbuf != 0) { free(io.cbuf); }
     if (io.body != 0) { free(io.body); }
     if (code == 0) {
       out->reused = 0;
