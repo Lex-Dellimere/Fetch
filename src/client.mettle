@@ -171,9 +171,8 @@ fn hc_fill(s: HttpStream*, io: HcIo*, p: uint8*, n: int64, deadline: int64) -> i
   return r;
 }
 
-// Reads the response head and body into io, and sets *res to the parsed head
-// (views into io->rbuf) and *body_start to where the body began there.
-// *reusable says the connection can carry another request.
+// Reads the response into io. res points into io->rbuf. *reusable says
+// the connection can carry another request.
 fn hc_read_response(c: HttpClient*, s: HttpStream*, io: HcIo*, is_head: bool, deadline: int64, res: HttpResponse*, reusable: bool*) -> int64 {
   io->rcap = 16384;
   io->rbuf = (uint8*)malloc(io->rcap);
@@ -280,8 +279,7 @@ fn hc_read_response(c: HttpClient*, s: HttpStream*, io: HcIo*, is_head: bool, de
   return 0;
 }
 
-// Decodes a gzip or deflate body into out. HTTP's "deflate" is zlib data,
-// but some servers send it raw, so that is tried second.
+// HTTP's "deflate" is zlib data, but some servers send it raw: try both.
 fn hc_decode(gzip: bool, src: uint8*, n: int64, max_out: int64, out: PressBuf*) -> int64 {
   press_buf_limit(out, max_out);
   var rc: int32 = PRESS_E_DATA;
@@ -557,25 +555,8 @@ fn hc_err(c: HttpClient*, arena: Arena*, code: int64) -> string {
   return http_client_error_text(code);
 }
 
-// A blocking request. url must be http:// or https://. headers are extra
-// request headers: a Host of yours replaces the default one, a Cookie or an
-// Accept-Encoding of yours replaces the client's own, and Content-Length,
-// Transfer-Encoding and Connection are set by the client (passing them is an
-// error). A body goes out with a Content-Length.
-//
-// When the response is gzip or deflate and the client asked for it, the
-// body is decoded and the Content-Encoding and Content-Length headers are
-// left out of the reply. A body over max_body, before or after decoding, is
-// an error.
-//
-// A 301, 302, 303, 307 or 308 with a Location is followed up to
-// max_redirects times. 303, and 301 and 302 after a POST, become GET with no
-// body. 307 and 308 keep the method and body. Authorization, Cookie and
-// Proxy-Authorization are not sent to another host or port.
-//
-// When a kept connection turns out to be closed before any byte of the
-// answer arrived, GET, HEAD, PUT, DELETE, OPTIONS and TRACE are sent again
-// once on a new connection. Other methods are not.
+// A blocking request with redirects, cookies and decoding; see docs/client.md.
+// The reply is allocated in arena.
 export fn http_client_request(c: HttpClient*, arena: Arena*, verb: string, url: string, headers: HttpHeader*, nheaders: int32, body: string) -> Result<HttpReply*, string> {
   c->detail = "";
   for i in 0..nheaders {
