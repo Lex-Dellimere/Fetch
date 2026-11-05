@@ -1,0 +1,161 @@
+// The cookie jar: Set-Cookie parsing, domain and path matching, expiry and
+// the Cookie header.
+import "http/cookie";
+import "std/arena";
+import "tutil";
+
+const NOW: int64 = 1700000000;
+
+fn parse(line: string, host: string, path: string, secure: bool, c: HttpCookie*) -> int32 {
+  var a: Arena* = arena_init((int64)0);
+  var rc: int32 = http_cookie_parse(a, line, host, path, secure, NOW, c);
+  // the strings live in the arena, so the caller reads them before it is gone
+  return rc;
+}
+
+fn header(j: HttpCookieJar*, host: string, path: string, secure: bool) -> string {
+  var a: Arena* = arena_init((int64)0);
+  var h: string = http_cookie_jar_header(j, a, host, path, secure);
+  var copy: string = "" + h;
+  arena_free(a);
+  return copy;
+}
+
+fn main() -> int32 {
+  var c: HttpCookie;
+
+  // attributes
+  var rc: int32 = parse("sid=abc123; Path=/app; Domain=.Example.COM; Secure; HttpOnly; SameSite=Lax; Max-Age=60", "www.example.com", "/app/x", true, &c);
+  t_eq("parse rc", (int64)rc, 0);
+  t_str("name", c.name, "sid");
+  t_str("value", c.value, "abc123");
+  t_str("domain", c.domain, "example.com");
+  t_str("path", c.path, "/app");
+  t_ok("flags", c.host_only == 0 && c.secure == 1 && c.http_only == 1 && c.same_site == HTTP_SAMESITE_LAX);
+  t_ok("max-age", c.persistent == 1 && c.expires == NOW + 60);
+
+  rc = parse("a=b", "Host.Example.com", "/dir/page?q=1", false, &c);
+  t_ok("host-only", rc == 0 && c.host_only == 1 && c.domain == "host.example.com" && c.persistent == 0 && c.secure == 0);
+  t_str("default path", c.path, "/dir");
+  rc = parse("a=b", "h.com", "/page", false, &c);
+  t_str("default path at root", c.path, "/");
+  rc = parse("a=b", "h.com", "", false, &c);
+  t_str("default path empty", c.path, "/");
+  rc = parse("a=b; Path=relative", "h.com", "/x/y", false, &c);
+  t_str("bad Path attribute", c.path, "/x");
+
+  // Max-Age beats Expires, and both forms of Expires
+  rc = parse("a=b; Expires=Wed, 09 Jun 2021 10:18:14 GMT; Max-Age=100", "h.com", "/", false, &c);
+  t_ok("max-age first", c.persistent == 1 && c.expires == NOW + 100);
+  rc = parse("a=b; Expires=Wed, 09 Jun 2021 10:18:14 GMT", "h.com", "/", false, &c);
+  t_eq("expires", c.expires, 1623233894);
+  rc = parse("a=b; Expires=Sunday, 06-Nov-94 08:49:37 GMT", "h.com", "/", false, &c);
+  t_eq("expires rfc850", c.expires, 784111777);
+  rc = parse("a=b; Expires=Sun Nov  6 08:49:37 1994", "h.com", "/", false, &c);
+  t_eq("expires asctime", c.expires, 784111777);
+  rc = parse("a=b; Expires=nonsense", "h.com", "/", false, &c);
+  t_ok("bad expires ignored", rc == 0 && c.persistent == 0);
+  rc = parse("a=b; Max-Age=0", "h.com", "/", false, &c);
+  t_ok("max-age 0", c.persistent == 1 && c.expires == 0);
+  rc = parse("a=b; Max-Age=-5", "h.com", "/", false, &c);
+  t_ok("max-age negative", c.persistent == 1 && c.expires == 0);
+  rc = parse("a=b; Max-Age=x5", "h.com", "/", false, &c);
+  t_ok("max-age junk ignored", c.persistent == 0);
+  var t: int64 = 0;
+  t_ok("date 2-digit year 69", http_cookie_parse_date("1 Jan 69 00:00:00", &t) && t == 3124224000);
+  t_ok("date 2-digit year 70", http_cookie_parse_date("1 Jan 70 00:00:00", &t) && t == 0);
+  t_ok("date no time", !http_cookie_parse_date("Wed, 09 Jun 2021", &t));
+  t_ok("date bad hour", !http_cookie_parse_date("09 Jun 2021 25:00:00", &t));
+
+  // refused
+  t_eq("no equals", (int64)parse("justaname", "h.com", "/", false, &c), (int64)HTTP_COOKIE_ERR_SYNTAX);
+  t_eq("empty name", (int64)parse("=v", "h.com", "/", false, &c), (int64)HTTP_COOKIE_ERR_SYNTAX);
+  t_eq("control byte", (int64)parse("a=b\rc", "h.com", "/", false, &c), (int64)HTTP_COOKIE_ERR_SYNTAX);
+  t_eq("bare TLD", (int64)parse("a=b; Domain=com", "www.example.com", "/", false, &c), (int64)HTTP_COOKIE_ERR_DOMAIN);
+  t_eq("bare TLD with dot", (int64)parse("a=b; Domain=.com", "www.example.com", "/", false, &c), (int64)HTTP_COOKIE_ERR_DOMAIN);
+  t_eq("other site", (int64)parse("a=b; Domain=other.com", "www.example.com", "/", false, &c), (int64)HTTP_COOKIE_ERR_DOMAIN);
+  t_eq("parent of host is not a match for sibling", (int64)parse("a=b; Domain=www.example.com", "example.com", "/", false, &c), (int64)HTTP_COOKIE_ERR_DOMAIN);
+  t_eq("suffix without dot boundary", (int64)parse("a=b; Domain=ample.com", "example.com", "/", false, &c), (int64)HTTP_COOKIE_ERR_DOMAIN);
+  t_eq("ip needs the same ip", (int64)parse("a=b; Domain=0.0.1", "127.0.0.1", "/", false, &c), (int64)HTTP_COOKIE_ERR_DOMAIN);
+  t_eq("ip same", (int64)parse("a=b; Domain=127.0.0.1", "127.0.0.1", "/", false, &c), 0);
+  t_ok("ip same stays host-only", c.host_only == 1);
+  rc = parse("a=b; Domain=localhost", "localhost", "/", false, &c);
+  t_ok("single label equal to the host", rc == 0 && c.host_only == 1 && c.domain == "localhost");
+  t_eq("secure over plain", (int64)parse("a=b; Secure", "h.com", "/", false, &c), (int64)HTTP_COOKIE_ERR_SECURE);
+  t_eq("secure prefix", (int64)parse("__Secure-a=b", "h.com", "/", true, &c), (int64)HTTP_COOKIE_ERR_SECURE);
+  t_eq("secure prefix ok", (int64)parse("__Secure-a=b; Secure", "h.com", "/", true, &c), 0);
+  t_eq("host prefix ok", (int64)parse("__Host-a=b; Secure; Path=/", "h.com", "/", true, &c), 0);
+  t_eq("host prefix with domain", (int64)parse("__Host-a=b; Secure; Path=/; Domain=h.com", "h.com", "/", true, &c), (int64)HTTP_COOKIE_ERR_SECURE);
+  t_eq("host prefix needs path", (int64)parse("__Host-a=b; Secure", "h.com", "/", true, &c), (int64)HTTP_COOKIE_ERR_SECURE);
+  var big: string = "a=" + "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+  var huge: string = big;
+  for i in 0..7 { huge = huge + huge; }
+  t_eq("too big", (int64)parse(huge, "h.com", "/", false, &c), (int64)HTTP_COOKIE_ERR_SIZE);
+
+  // matching
+  var j: HttpCookieJar;
+  http_cookie_jar_init(&j);
+  j.now = NOW;
+  http_cookie_jar_set(&j, "host=1", "example.com", "/", false);
+  http_cookie_jar_set(&j, "dom=2; Domain=example.com", "example.com", "/", false);
+  http_cookie_jar_set(&j, "deep=3; Path=/a/b", "example.com", "/a/b/c", false);
+  http_cookie_jar_set(&j, "mid=4; Path=/a", "example.com", "/a/x", false);
+  http_cookie_jar_set(&j, "sec=5; Secure", "example.com", "/", true);
+  t_eq("count", (int64)http_cookie_jar_count(&j), 5);
+  t_str("root", header(&j, "example.com", "/", false), "host=1; dom=2");
+  t_str("secure sent over tls", header(&j, "example.com", "/", true), "host=1; dom=2; sec=5");
+  t_str("subdomain gets domain cookies only", header(&j, "www.example.com", "/", false), "dom=2");
+  t_str("other host", header(&j, "example.org", "/", false), "");
+  t_str("not a suffix", header(&j, "badexample.com", "/", false), "");
+  t_str("longer path first", header(&j, "Example.com", "/a/b/c?x=1", false), "deep=3; mid=4; host=1; dom=2");
+  t_str("path must end at a slash", header(&j, "example.com", "/ab", false), "host=1; dom=2");
+  t_str("path equal", header(&j, "example.com", "/a", false), "mid=4; host=1; dom=2");
+  t_str("path /a/b but request /a/", header(&j, "example.com", "/a/", false), "mid=4; host=1; dom=2");
+
+  // replace, delete and expire
+  http_cookie_jar_set(&j, "host=new", "example.com", "/", false);
+  t_eq("replace keeps count", (int64)http_cookie_jar_count(&j), 5);
+  t_str("replaced value", header(&j, "example.com", "/", false), "host=new; dom=2");
+  t_eq("delete rc", (int64)http_cookie_jar_set(&j, "host=; Max-Age=0", "example.com", "/", false), (int64)HTTP_COOKIE_DELETED);
+  t_eq("delete count", (int64)http_cookie_jar_count(&j), 4);
+  http_cookie_jar_set(&j, "short=1; Max-Age=30", "example.com", "/", false);
+  http_cookie_jar_set(&j, "dated=1; Expires=Tue, 14 Nov 2023 22:14:30 GMT", "example.com", "/", false);
+  t_str("before expiry", header(&j, "example.com", "/", false), "dom=2; short=1; dated=1");
+  j.now = NOW + 29;
+  t_str("29 seconds", header(&j, "example.com", "/", false), "dom=2; short=1; dated=1");
+  j.now = NOW + 30;
+  t_str("30 seconds", header(&j, "example.com", "/", false), "dom=2; dated=1");
+  t_eq("expired cookie is gone", (int64)http_cookie_jar_count(&j), 5);
+  j.now = 1700000000 + 86400;
+  t_str("date passed", header(&j, "example.com", "/", false), "dom=2");
+  t_eq("a past Expires stores nothing", (int64)http_cookie_jar_set(&j, "old=1; Expires=Wed, 09 Jun 2021 10:18:14 GMT", "example.com", "/", false), (int64)HTTP_COOKIE_DELETED);
+  t_ok("find", http_cookie_jar_find(&j, "dom", "example.com", "/") != (HttpCookie*)0);
+  t_ok("find miss", http_cookie_jar_find(&j, "dom", "example.org", "/") == (HttpCookie*)0);
+
+  // same name, different path or domain: separate cookies
+  http_cookie_jar_clear(&j);
+  http_cookie_jar_set(&j, "n=1", "a.example.com", "/", false);
+  http_cookie_jar_set(&j, "n=2; Domain=example.com", "a.example.com", "/", false);
+  http_cookie_jar_set(&j, "n=3; Path=/p", "a.example.com", "/", false);
+  t_eq("three cookies named n", (int64)http_cookie_jar_count(&j), 3);
+  t_str("order", header(&j, "a.example.com", "/p/q", false), "n=3; n=1; n=2");
+
+  // limits
+  http_cookie_jar_clear(&j);
+  j.max_per_domain = 3;
+  for i in 0..6 {
+    var line: string = "k{i}=v";
+    http_cookie_jar_set(&j, line, "x.com", "/", false);
+  }
+  t_eq("per domain cap", (int64)http_cookie_jar_count(&j), 3);
+  t_str("oldest dropped", header(&j, "x.com", "/", false), "k3=v; k4=v; k5=v");
+  j.max_per_domain = 50;
+  j.max_total = 4;
+  http_cookie_jar_set(&j, "z=1", "y.com", "/", false);
+  http_cookie_jar_set(&j, "z=1", "w.com", "/", false);
+  t_eq("total cap", (int64)http_cookie_jar_count(&j), 4);
+  t_str("oldest dropped overall", header(&j, "x.com", "/", false), "k4=v; k5=v");
+
+  http_cookie_jar_free(&j);
+  return t_done("cookie");
+}
