@@ -1,7 +1,7 @@
 // An HTTP/1.1 client on top of std/http: it keeps idle connections for
 // reuse, follows redirects, keeps cookies and decodes gzip and deflate.
 //
-// One HttpClient serves one thread at a time. Everything a request returns
+// One FetchClient serves one thread at a time. Everything a request returns
 // is allocated in the arena you pass.
 
 import "std/core";
@@ -11,15 +11,15 @@ import "std/socket";
 import "std/mem";
 import "std/http";
 import "press/press";
-import "http/stream";
-import "http/pool";
-import "http/cookie";
-import "http/redirect";
-import "http/tls";
-import "http/error";
+import "fetch/stream";
+import "fetch/pool";
+import "fetch/cookie";
+import "fetch/redirect";
+import "fetch/tls";
+import "fetch/error";
 
 // What a request returns. Everything in it lives in the arena.
-export struct HttpReply {
+export struct FetchReply {
   status: int32;
   nheaders: int32;
   reason: string;
@@ -30,42 +30,42 @@ export struct HttpReply {
   reused: int32;      // 1 when a kept connection carried the final request
 }
 
-export struct HttpClient {
+export struct FetchClient {
   timeout_ms: int64;        // for one request with its redirects; 0 for no limit
   max_body: int64;          // the most body bytes taken, before and after decoding
   max_redirects: int32;     // 0 follows none
   allow_downgrade: int32;   // 1 lets a redirect go from https to http
   decompress: int32;        // 1 asks for gzip and deflate and decodes them
   keep_alive: int32;        // 1 keeps connections for reuse
-  jar: HttpCookieJar*;      // cookies are stored and sent when this is set
-  pool: HttpPool;
-  tls: HttpTlsConfig;
+  jar: FetchCookieJar*;      // cookies are stored and sent when this is set
+  pool: FetchPool;
+  tls: FetchTlsConfig;
   dials: int64;             // connections opened
   reuses: int64;            // requests sent on a kept connection
   retries: int64;           // requests sent again after a kept connection had closed
   detail: string;           // extra text for the last connection error
 }
 
-export fn http_client_init(c: HttpClient*) {
-  memset(c, 0, (int64)sizeof(HttpClient));
+export fn fetch_client_init(c: FetchClient*) {
+  memset(c, 0, (int64)sizeof(FetchClient));
   c->timeout_ms = 30000;
   c->max_body = HTTP_CLIENT_MAX_BODY;
   c->max_redirects = 10;
   c->decompress = 1;
   c->keep_alive = 1;
-  http_pool_init(&c->pool);
-  http_tls_init(&c->tls);
+  fetch_pool_init(&c->pool);
+  fetch_tls_init(&c->tls);
 }
 
 // Closes the kept connections. The cookie jar is yours to free.
-export fn http_client_free(c: HttpClient*) {
-  http_pool_close_all(&c->pool);
-  http_tls_free(&c->tls);
+export fn fetch_client_free(c: FetchClient*) {
+  fetch_pool_close_all(&c->pool);
+  fetch_tls_free(&c->tls);
 }
 
 // Closes the kept connections that have been idle for too long.
-export fn http_client_prune(c: HttpClient*) {
-  http_pool_prune(&c->pool);
+export fn fetch_client_prune(c: FetchClient*) {
+  fetch_pool_prune(&c->pool);
 }
 
 fn hc_lower(c: int32) -> int32 {
@@ -117,7 +117,7 @@ fn hc_left(deadline: int64) -> int64 {
 
 // Reads once, waiting until the deadline. Returns the bytes read, 0 at the
 // end of the stream, HTTP_ERR_TIMEOUT or HTTP_ERR_IO.
-fn hc_recv(s: HttpStream*, p: uint8*, n: int64, deadline: int64) -> int64 {
+fn hc_recv(s: FetchStream*, p: uint8*, n: int64, deadline: int64) -> int64 {
   while (true) {
     var left: int64 = hc_left(deadline);
     if (deadline >= 0 && left == 0) { return HTTP_ERR_TIMEOUT; }
@@ -126,7 +126,7 @@ fn hc_recv(s: HttpStream*, p: uint8*, n: int64, deadline: int64) -> int64 {
       if (w == 0) { return HTTP_ERR_TIMEOUT; }
       if (w < 0) { return HTTP_ERR_IO; }
     }
-    var r: int64 = http_stream_read(s, p, n);
+    var r: int64 = fetch_stream_read(s, p, n);
     if (r == -NET_EINTR || r == -NET_EAGAIN) { continue; }
     if (r < 0) { return HTTP_ERR_IO; }
     return r;
@@ -134,8 +134,8 @@ fn hc_recv(s: HttpStream*, p: uint8*, n: int64, deadline: int64) -> int64 {
   return 0;
 }
 
-fn hc_send(s: HttpStream*, p: uint8*, n: int64) -> int64 {
-  var r: int64 = http_stream_write(s, p, n);
+fn hc_send(s: FetchStream*, p: uint8*, n: int64) -> int64 {
+  var r: int64 = fetch_stream_write(s, p, n);
   if (r == -NET_EAGAIN || r == -NET_ETIMEDOUT) { return HTTP_ERR_TIMEOUT; }
   if (r < 0) { return HTTP_ERR_IO; }
   return 0;
@@ -165,7 +165,7 @@ fn hc_body_reserve(io: HcIo*, need: int64) -> bool {
   return true;
 }
 
-fn hc_fill(s: HttpStream*, io: HcIo*, p: uint8*, n: int64, deadline: int64) -> int64 {
+fn hc_fill(s: FetchStream*, io: HcIo*, p: uint8*, n: int64, deadline: int64) -> int64 {
   var r: int64 = hc_recv(s, p, n, deadline);
   if (r > 0) { io->got_bytes = 1; }
   return r;
@@ -173,7 +173,7 @@ fn hc_fill(s: HttpStream*, io: HcIo*, p: uint8*, n: int64, deadline: int64) -> i
 
 // Reads the response into io. res points into io->rbuf. *reusable says
 // the connection can carry another request.
-fn hc_read_response(c: HttpClient*, s: HttpStream*, io: HcIo*, is_head: bool, deadline: int64, res: HttpResponse*, reusable: bool*) -> int64 {
+fn hc_read_response(c: FetchClient*, s: FetchStream*, io: HcIo*, is_head: bool, deadline: int64, res: HttpResponse*, reusable: bool*) -> int64 {
   io->rcap = 16384;
   io->rbuf = (uint8*)malloc(io->rcap);
   if (io->rbuf == 0) { return HTTP_ERR_NOMEM; }
@@ -295,11 +295,11 @@ fn hc_decode(gzip: bool, src: uint8*, n: int64, max_out: int64, out: PressBuf*) 
   if (rc == PRESS_OK) { return 0; }
   if (rc == PRESS_E_LIMIT) { return HTTP_ERR_BODY_TOO_LARGE; }
   if (rc == PRESS_E_MEM) { return HTTP_ERR_NOMEM; }
-  return HTTP_CLIENT_ERR_ENCODING;
+  return FETCH_CLIENT_ERR_ENCODING;
 }
 
 // Copies the response into the arena, decoding the body when asked.
-fn hc_finish(c: HttpClient*, arena: Arena*, res: HttpResponse*, io: HcIo*, decode: bool, out: HttpReply*) -> int64 {
+fn hc_finish(c: FetchClient*, arena: Arena*, res: HttpResponse*, io: HcIo*, decode: bool, out: FetchReply*) -> int64 {
   out->status = res->status;
   out->reason = hc_copy(arena, res->reason);
   out->headers = (HttpHeader*)arena_alloc(arena, (int64)(res->nheaders + 1) * (int64)sizeof(HttpHeader));
@@ -383,10 +383,10 @@ fn hc_text(arena: Arena*, a: string, b: string) -> string {
 }
 
 // Opens a connection for u, plain or TLS.
-fn hc_dial(c: HttpClient*, arena: Arena*, u: HttpUrl*, key: string, deadline: int64, out: HttpConn**) -> int64 {
+fn hc_dial(c: FetchClient*, arena: Arena*, u: HttpUrl*, key: string, deadline: int64, out: FetchConn**) -> int64 {
   var left: int64 = hc_left(deadline);
   if (deadline >= 0 && left == 0) { return HTTP_ERR_TIMEOUT; }
-  if (u->tls != 0) { return http_tls_dial(&c->tls, arena, u->host, u->port, left, key, out, &c->detail); }
+  if (u->tls != 0) { return fetch_tls_dial(&c->tls, arena, u->host, u->port, left, key, out, &c->detail); }
   var fd: int64 = 0;
   match (tcp_connect(u->host, u->port, left)) {
     case Ok(s): { fd = s; }
@@ -395,7 +395,7 @@ fn hc_dial(c: HttpClient*, arena: Arena*, u: HttpUrl*, key: string, deadline: in
       return HTTP_ERR_CONNECT;
     }
   }
-  var conn: HttpConn* = http_conn_new(http_stream_plain(fd), key);
+  var conn: FetchConn* = fetch_conn_new(fetch_stream_plain(fd), key);
   if (conn == 0) {
     sock_close(fd);
     return HTTP_ERR_NOMEM;
@@ -405,7 +405,7 @@ fn hc_dial(c: HttpClient*, arena: Arena*, u: HttpUrl*, key: string, deadline: in
 }
 
 // One request and its response. Cookies go in and come out here.
-fn hc_hop(c: HttpClient*, arena: Arena*, verb: string, u: HttpUrl*, headers: HttpHeader*, nheaders: int32, body: string, deadline: int64, out: HttpReply*) -> int64 {
+fn hc_hop(c: FetchClient*, arena: Arena*, verb: string, u: HttpUrl*, headers: HttpHeader*, nheaders: int32, body: string, deadline: int64, out: FetchReply*) -> int64 {
   var has_host: bool = false;
   var has_cookie: bool = false;
   var has_enc: bool = false;
@@ -453,7 +453,7 @@ fn hc_hop(c: HttpClient*, arena: Arena*, verb: string, u: HttpUrl*, headers: Htt
     count = count + 1;
   }
   if (c->jar != 0 && !has_cookie) {
-    var jv: string = http_cookie_jar_header(c->jar, arena, u->host, u->path, u->tls != 0);
+    var jv: string = fetch_cookie_jar_header(c->jar, arena, u->host, u->path, u->tls != 0);
     if (jv.length > 0) {
       all[count].name = "Cookie";
       all[count].value = jv;
@@ -484,10 +484,10 @@ fn hc_hop(c: HttpClient*, arena: Arena*, verb: string, u: HttpUrl*, headers: Htt
 
   var attempt: int32 = 0;
   while (true) {
-    var conn: HttpConn* = (HttpConn*)0;
+    var conn: FetchConn* = (FetchConn*)0;
     var reused: bool = false;
     if (c->keep_alive != 0 && attempt == 0) {
-      conn = http_pool_take(&c->pool, key);
+      conn = fetch_pool_take(&c->pool, key);
       if (conn != 0) { reused = true; }
     }
     if (conn == 0) {
@@ -502,7 +502,7 @@ fn hc_hop(c: HttpClient*, arena: Arena*, verb: string, u: HttpUrl*, headers: Htt
     memset(&io, 0, (int64)sizeof(HcIo));
     var res: HttpResponse;
     var reusable: bool = false;
-    var s: HttpStream* = &conn->stream;
+    var s: FetchStream* = &conn->stream;
     if (conn->probe_fd >= 0) {
       var left: int64 = hc_left(deadline);
       if (left < 0) {
@@ -518,7 +518,7 @@ fn hc_hop(c: HttpClient*, arena: Arena*, verb: string, u: HttpUrl*, headers: Htt
     if (code == 0 && c->jar != 0) {
       for i in 0..res.nheaders {
         if (hc_ieq(res.headers[i].name, "set-cookie")) {
-          http_cookie_jar_set(c->jar, res.headers[i].value, u->host, u->path, u->tls != 0);
+          fetch_cookie_jar_set(c->jar, res.headers[i].value, u->host, u->path, u->tls != 0);
         }
       }
     }
@@ -530,13 +530,13 @@ fn hc_hop(c: HttpClient*, arena: Arena*, verb: string, u: HttpUrl*, headers: Htt
       if (reused) { out->reused = 1; }
       conn->uses = conn->uses + 1;
       if (reusable && c->keep_alive != 0) {
-        http_pool_put(&c->pool, conn);
+        fetch_pool_put(&c->pool, conn);
       } else {
-        http_conn_close(conn);
+        fetch_conn_close(conn);
       }
       return 0;
     }
-    http_conn_close(conn);
+    fetch_conn_close(conn);
     var stale: bool = (code == HTTP_ERR_CLOSED || code == HTTP_ERR_IO) && io.got_bytes == 0;
     if (reused && stale && hc_idempotent(verb)) {
       attempt = 1;
@@ -548,16 +548,16 @@ fn hc_hop(c: HttpClient*, arena: Arena*, verb: string, u: HttpUrl*, headers: Htt
   return 0;
 }
 
-fn hc_err(c: HttpClient*, arena: Arena*, code: int64) -> string {
-  if ((code == HTTP_ERR_CONNECT || code == HTTP_CLIENT_ERR_HANDSHAKE || code == HTTP_CLIENT_ERR_CERT) && c->detail.length > 0) {
-    return hc_text(arena, hc_text(arena, http_client_error_text(code), ": "), c->detail);
+fn hc_err(c: FetchClient*, arena: Arena*, code: int64) -> string {
+  if ((code == HTTP_ERR_CONNECT || code == FETCH_CLIENT_ERR_HANDSHAKE || code == FETCH_CLIENT_ERR_CERT) && c->detail.length > 0) {
+    return hc_text(arena, hc_text(arena, fetch_client_error_text(code), ": "), c->detail);
   }
-  return http_client_error_text(code);
+  return fetch_client_error_text(code);
 }
 
 // A blocking request with redirects, cookies and decoding; see docs/client.md.
 // The reply is allocated in arena.
-export fn http_client_request(c: HttpClient*, arena: Arena*, verb: string, url: string, headers: HttpHeader*, nheaders: int32, body: string) -> Result<HttpReply*, string> {
+export fn fetch_client_request(c: FetchClient*, arena: Arena*, verb: string, url: string, headers: HttpHeader*, nheaders: int32, body: string) -> Result<FetchReply*, string> {
   c->detail = "";
   for i in 0..nheaders {
     if (hc_ieq(headers[i].name, "content-length") || hc_ieq(headers[i].name, "transfer-encoding") || hc_ieq(headers[i].name, "connection")) {
@@ -566,7 +566,7 @@ export fn http_client_request(c: HttpClient*, arena: Arena*, verb: string, url: 
   }
   var u: HttpUrl;
   if (http_url_parse(url, &u) != 0) { return Err("bad URL"); }
-  if (!hc_ieq(u.scheme, "http") && !hc_ieq(u.scheme, "https")) { return Err(http_client_error_text(HTTP_CLIENT_ERR_SCHEME)); }
+  if (!hc_ieq(u.scheme, "http") && !hc_ieq(u.scheme, "https")) { return Err(fetch_client_error_text(FETCH_CLIENT_ERR_SCHEME)); }
 
   var deadline: int64 = hc_deadline(c->timeout_ms);
   var cur: string = url;
@@ -579,34 +579,34 @@ export fn http_client_request(c: HttpClient*, arena: Arena*, verb: string, url: 
 
   var redirects: int32 = 0;
   while (true) {
-    var reply: HttpReply* = (HttpReply*)arena_alloc_zeroed(arena, (int64)sizeof(HttpReply));
+    var reply: FetchReply* = (FetchReply*)arena_alloc_zeroed(arena, (int64)sizeof(FetchReply));
     if (reply == 0) { return Err(http_error_text(HTTP_ERR_NOMEM)); }
     var code: int64 = hc_hop(c, arena, cverb, &u, hdrs, nh, cbody, deadline, reply);
     if (code != 0) { return Err(hc_err(c, arena, code)); }
     reply->url = hc_copy(arena, cur);
     reply->redirects = redirects;
-    if (c->max_redirects <= 0 || !http_redirect_follows(reply->status)) { return Ok(reply); }
+    if (c->max_redirects <= 0 || !fetch_redirect_follows(reply->status)) { return Ok(reply); }
     var loc: string = "";
     match (http_header(reply->headers, reply->nheaders, "location")) {
       case Some(v): { loc = v; }
       case None: { return Ok(reply); }
     }
-    if (redirects >= c->max_redirects) { return Err(http_client_error_text(HTTP_CLIENT_ERR_REDIRECTS)); }
+    if (redirects >= c->max_redirects) { return Err(fetch_client_error_text(FETCH_CLIENT_ERR_REDIRECTS)); }
 
     var sb: StrBuf* = strbuf_new(arena, 128);
     if (sb == 0) { return Err(http_error_text(HTTP_ERR_NOMEM)); }
-    if (http_url_resolve(arena, &u, loc, sb) != 0) { return Err(http_client_error_text(HTTP_CLIENT_ERR_LOCATION)); }
+    if (fetch_url_resolve(arena, &u, loc, sb) != 0) { return Err(fetch_client_error_text(FETCH_CLIENT_ERR_LOCATION)); }
     var next: string = strbuf_finish_string(sb);
     var nu: HttpUrl;
-    if (http_url_parse(next, &nu) != 0) { return Err(http_client_error_text(HTTP_CLIENT_ERR_LOCATION)); }
-    if (u.tls != 0 && nu.tls == 0 && c->allow_downgrade == 0) { return Err(http_client_error_text(HTTP_CLIENT_ERR_DOWNGRADE)); }
+    if (http_url_parse(next, &nu) != 0) { return Err(fetch_client_error_text(FETCH_CLIENT_ERR_LOCATION)); }
+    if (u.tls != 0 && nu.tls == 0 && c->allow_downgrade == 0) { return Err(fetch_client_error_text(FETCH_CLIENT_ERR_DOWNGRADE)); }
 
-    var keep_body: bool = http_redirect_keeps_body(reply->status, cverb);
+    var keep_body: bool = fetch_redirect_keeps_body(reply->status, cverb);
     var fresh: HttpHeader* = (HttpHeader*)arena_alloc(arena, (int64)(nh + 1) * (int64)sizeof(HttpHeader));
     if (fresh == 0) { return Err(http_error_text(HTTP_ERR_NOMEM)); }
-    nh = http_redirect_headers(hdrs, nh, fresh, !http_url_same_host(&u, &nu), !keep_body);
+    nh = fetch_redirect_headers(hdrs, nh, fresh, !fetch_url_same_host(&u, &nu), !keep_body);
     hdrs = fresh;
-    cverb = http_redirect_method(reply->status, cverb);
+    cverb = fetch_redirect_method(reply->status, cverb);
     if (!keep_body) { cbody = ""; }
     cur = next;
     u = nu;
@@ -616,6 +616,6 @@ export fn http_client_request(c: HttpClient*, arena: Arena*, verb: string, url: 
 }
 
 // GET url.
-export fn http_client_get(c: HttpClient*, arena: Arena*, url: string) -> Result<HttpReply*, string> {
-  return http_client_request(c, arena, "GET", url, (HttpHeader*)0, 0, "");
+export fn fetch_client_get(c: FetchClient*, arena: Arena*, url: string) -> Result<FetchReply*, string> {
+  return fetch_client_request(c, arena, "GET", url, (HttpHeader*)0, 0, "");
 }

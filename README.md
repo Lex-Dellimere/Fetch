@@ -1,4 +1,4 @@
-# http
+# fetch
 
 An HTTP client for [Mettle](https://github.com/The-Mettle-Project/Mettle). It sits on top of `std/http` (the parsers and writers) and adds:
 
@@ -16,51 +16,51 @@ In your `mbuild.mettle`:
 
 ```mettle
 fn deps() {
-  mb_dep_path("http", "../http");
+  mb_dep_path("fetch", "../fetch");
 }
 ```
 
-http depends on mtls and Press. They are path dependencies for now (`../mtls` and `../press` next to this package). They become registry dependencies once they are listed.
+fetch depends on mtls and Press. They are path dependencies for now (`../mtls` and `../press` next to this package). They become registry dependencies once they are listed.
 
 ## Use it
 
 ```mettle
-import "http/http";
+import "fetch/fetch";
 import "std/arena";
 import "std/io";
 
 fn main() -> int32 {
   var arena: Arena* = arena_init(0);
-  var jar: HttpCookieJar;
-  http_cookie_jar_init(&jar);
+  var jar: FetchCookieJar;
+  fetch_cookie_jar_init(&jar);
 
-  var c: HttpClient;
-  http_client_init(&c);
+  var c: FetchClient;
+  fetch_client_init(&c);
   c.jar = &jar;                       // optional: keep cookies
 
-  match (http_client_get(&c, arena, "https://example.org/")) {
+  match (fetch_client_get(&c, arena, "https://example.org/")) {
     case Ok(r): { println("{r->status} {r->body}"); }
     case Err(e): { println("failed: {e}"); }
   }
 
-  http_client_free(&c);
-  http_cookie_jar_free(&jar);
+  fetch_client_free(&c);
+  fetch_cookie_jar_free(&jar);
   arena_free(arena);
   return 0;
 }
 ```
 
-`import "http/http"` brings in everything. Import one module, such as `"http/cookie"`, to keep a build small.
+`import "fetch/fetch"` brings in everything. Import one module, such as `"fetch/cookie"`, to keep a build small.
 
 | Module | What it has |
 |---|---|
-| `http/client` | `HttpClient`, `http_client_request`, `http_client_get`, `HttpReply` |
-| `http/pool` | the idle connection pool: `HttpPool`, `HttpConn` |
-| `http/redirect` | redirect rules and `http_url_resolve` |
-| `http/cookie` | `HttpCookieJar`, `HttpCookie`, Set-Cookie parsing |
-| `http/tls` | `HttpTlsConfig`, the https connection |
-| `http/stream` | `HttpStream`, the byte stream the client reads and writes |
-| `http/error` | the error codes the client adds to `HTTP_ERR_*` |
+| `fetch/client` | `FetchClient`, `fetch_client_request`, `fetch_client_get`, `FetchReply` |
+| `fetch/pool` | the idle connection pool: `FetchPool`, `FetchConn` |
+| `fetch/redirect` | redirect rules and `fetch_url_resolve` |
+| `fetch/cookie` | `FetchCookieJar`, `FetchCookie`, Set-Cookie parsing |
+| `fetch/tls` | `FetchTlsConfig`, the https connection |
+| `fetch/stream` | `FetchStream`, the byte stream the client reads and writes |
+| `fetch/error` | the error codes the client adds to `HTTP_ERR_*` |
 
 Every name starts with `http_`, `Http` or `HTTP_`. The names from `std/http` are unchanged, so you can use both.
 
@@ -71,10 +71,10 @@ Every name starts with `http_`, `Http` or `HTTP_`. The names from `std/http` are
 
 ## Things to know
 
-- An `HttpClient` serves one thread at a time. Use one client per thread.
+- An `FetchClient` serves one thread at a time. Use one client per thread.
 - Everything a request returns lives in the arena you pass.
-- Idle connections are closed when they have been idle too long, but only when the client is next used or when you call `http_client_prune`. There is no background thread.
-- `HttpStream` has the shape of the `NetStream` that is planned for `std`. When `std` has it, the client will use that type instead.
+- Idle connections are closed when they have been idle too long, but only when the client is next used or when you call `fetch_client_prune`. There is no background thread.
+- `FetchStream` has the shape of the `NetStream` that is planned for `std`. When `std` has it, the client will use that type instead.
 - There is no wss:// helper for the WebSocket client yet, and no HTTP/2 client. The client speaks HTTP/1.1.
 - There is no public suffix list. The cookie jar refuses a `Domain` with no dot, such as `com`, but it cannot know that `co.uk` is a suffix.
 

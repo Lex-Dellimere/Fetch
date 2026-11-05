@@ -1,4 +1,4 @@
-// https for the client, over mtls. A TLS connection is an HttpStream whose
+// https for the client, over mtls. A TLS connection is an FetchStream whose
 // context is an MtlsStream.
 //
 // The first https request builds the TLS config, so set roots and insecure
@@ -12,11 +12,11 @@ import "std/strbuf";
 import "std/socket";
 import "std/http";
 import "mtls/mtls";
-import "http/stream";
-import "http/pool";
-import "http/error";
+import "fetch/stream";
+import "fetch/pool";
+import "fetch/error";
 
-export struct HttpTlsConfig {
+export struct FetchTlsConfig {
   roots: MtlsRoots*;      // trust anchors; 0 uses the system's
   insecure: int32;        // 1 skips every certificate check: for tests only
   ready: int32;
@@ -25,21 +25,21 @@ export struct HttpTlsConfig {
   cfg: MtlsConfig;
 }
 
-export fn http_tls_init(t: HttpTlsConfig*) {
-  memset(t, 0, (int64)sizeof(HttpTlsConfig));
+export fn fetch_tls_init(t: FetchTlsConfig*) {
+  memset(t, 0, (int64)sizeof(FetchTlsConfig));
 }
 
-export fn http_tls_free(t: HttpTlsConfig*) {
+export fn fetch_tls_free(t: FetchTlsConfig*) {
   if (t->ready != 0) { mtls_config_free(&t->cfg); }
   if (t->sys_loaded != 0) { mtls_roots_free(&t->sys); }
   t->ready = 0;
   t->sys_loaded = 0;
 }
 
-fn ht_prepare(t: HttpTlsConfig*) {
+fn ht_prepare(t: FetchTlsConfig*) {
   if (t->ready != 0) { return; }
   mtls_config_init(&t->cfg);
-  mtls_config_add_alpn(&t->cfg, "http/1.1");
+  mtls_config_add_alpn(&t->cfg, "fetch/1.1");
   if (t->insecure != 0) { t->cfg.verify_mode = MTLS_VERIFY_NONE; }
   if (t->roots != 0) {
     t->cfg.roots = t->roots;
@@ -82,7 +82,7 @@ fn ht_text(arena: Arena*, a: string, b: string) -> string {
 
 // Connects to host:port and runs the TLS handshake. On failure returns an
 // HTTP error code and puts the reason in *detail. timeout_ms is -1 for no limit.
-export fn http_tls_dial(t: HttpTlsConfig*, arena: Arena*, host: string, port: int32, timeout_ms: int64, key: string, out: HttpConn**, detail: string*) -> int64 {
+export fn fetch_tls_dial(t: FetchTlsConfig*, arena: Arena*, host: string, port: int32, timeout_ms: int64, key: string, out: FetchConn**, detail: string*) -> int64 {
   ht_prepare(t);
   var fd: int64 = -1;
   match (tcp_connect(host, port, timeout_ms)) {
@@ -108,24 +108,24 @@ export fn http_tls_dial(t: HttpTlsConfig*, arena: Arena*, host: string, port: in
       var cv: int32 = mtls_conn_cert_error(ms->c);
       if (cv != 0) {
         *detail = ht_text(arena, "", mtls_cv_text(cv));
-        code = HTTP_CLIENT_ERR_CERT;
+        code = FETCH_CLIENT_ERR_CERT;
       }
     }
     if (code == 0) {
-      code = HTTP_CLIENT_ERR_HANDSHAKE;
+      code = FETCH_CLIENT_ERR_HANDSHAKE;
       if (rc == MTLS_E_TIMEOUT) { code = HTTP_ERR_TIMEOUT; }
     }
     mtls_stream_close(ms);
     free(ms);
     return code;
   }
-  var st: HttpStream;
+  var st: FetchStream;
   st.ctx = (rawptr)ms;
   st.read = &ht_read;
   st.write = &ht_write;
   st.close = &ht_close;
   st.fd = -1;
-  var conn: HttpConn* = http_conn_new(st, key);
+  var conn: FetchConn* = fetch_conn_new(st, key);
   if (conn == 0) {
     mtls_stream_close(ms);
     free(ms);

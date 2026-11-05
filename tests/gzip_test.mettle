@@ -1,5 +1,5 @@
 // gzip and deflate bodies from a loopback server, packed with Press.
-import "http/http";
+import "fetch/fetch";
 import "press/press";
 import "server";
 import "tutil";
@@ -79,17 +79,17 @@ fn str_view(s: string, from: int64, n: int64) -> string {
   return o;
 }
 
-fn body_of(r: Result<HttpReply*, string>) -> string {
+fn body_of(r: Result<FetchReply*, string>) -> string {
   match (r) {
     case Ok(x): { return "" + x->body; }
     case Err(e): { return "ERR:" + e; }
   }
 }
 
-fn reply_of(r: Result<HttpReply*, string>) -> HttpReply* {
+fn reply_of(r: Result<FetchReply*, string>) -> FetchReply* {
   match (r) {
     case Ok(x): { return x; }
-    case Err(e): { return (HttpReply*)0; }
+    case Err(e): { return (FetchReply*)0; }
   }
 }
 
@@ -104,51 +104,51 @@ fn main() -> int32 {
 
   srv_start(&page);
   var a: Arena* = arena_init((int64)0);
-  var c: HttpClient;
-  http_client_init(&c);
+  var c: FetchClient;
+  fetch_client_init(&c);
 
   var n0: int32 = srv_requests();
-  var r: HttpReply* = reply_of(http_client_get(&c, a, srv_url(a, "/gzip")));
-  t_ok("gzip", r != (HttpReply*)0 && r->body == TEXT);
+  var r: FetchReply* = reply_of(fetch_client_get(&c, a, srv_url(a, "/gzip")));
+  t_ok("gzip", r != (FetchReply*)0 && r->body == TEXT);
   t_str("asked for it", srv_log_header(n0, "Accept-Encoding"), "gzip, deflate");
   t_ok("headers describe the decoded body", http_header_find(r->headers, r->nheaders, "content-encoding", 0) < 0 && http_header_find(r->headers, r->nheaders, "content-length", 0) < 0);
-  t_str("x-gzip", body_of(http_client_get(&c, a, srv_url(a, "/xgzip"))), TEXT);
-  t_str("deflate with zlib framing", body_of(http_client_get(&c, a, srv_url(a, "/zlib"))), TEXT);
-  t_str("deflate without framing", body_of(http_client_get(&c, a, srv_url(a, "/raw"))), TEXT);
-  t_str("chunked gzip", body_of(http_client_get(&c, a, srv_url(a, "/chunked"))), TEXT);
-  t_str("identity", body_of(http_client_get(&c, a, srv_url(a, "/identity"))), TEXT);
-  t_str("not encoded", body_of(http_client_get(&c, a, srv_url(a, "/plain"))), TEXT);
-  t_str("unknown coding is left alone", body_of(http_client_get(&c, a, srv_url(a, "/br"))), "brotli bytes");
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/empty")));
-  t_ok("empty body", r != (HttpReply*)0 && r->status == 204 && r->body.length == 0);
-  t_str("bad data", body_of(http_client_get(&c, a, srv_url(a, "/junk"))), "ERR:bad gzip or deflate data");
+  t_str("x-gzip", body_of(fetch_client_get(&c, a, srv_url(a, "/xgzip"))), TEXT);
+  t_str("deflate with zlib framing", body_of(fetch_client_get(&c, a, srv_url(a, "/zlib"))), TEXT);
+  t_str("deflate without framing", body_of(fetch_client_get(&c, a, srv_url(a, "/raw"))), TEXT);
+  t_str("chunked gzip", body_of(fetch_client_get(&c, a, srv_url(a, "/chunked"))), TEXT);
+  t_str("identity", body_of(fetch_client_get(&c, a, srv_url(a, "/identity"))), TEXT);
+  t_str("not encoded", body_of(fetch_client_get(&c, a, srv_url(a, "/plain"))), TEXT);
+  t_str("unknown coding is left alone", body_of(fetch_client_get(&c, a, srv_url(a, "/br"))), "brotli bytes");
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/empty")));
+  t_ok("empty body", r != (FetchReply*)0 && r->status == 204 && r->body.length == 0);
+  t_str("bad data", body_of(fetch_client_get(&c, a, srv_url(a, "/junk"))), "ERR:bad gzip or deflate data");
 
   // a small body that grows past the limit when decoded
   c.max_body = 65536;
-  t_str("bomb", body_of(http_client_get(&c, a, srv_url(a, "/bomb"))), "ERR:body too large");
+  t_str("bomb", body_of(fetch_client_get(&c, a, srv_url(a, "/bomb"))), "ERR:body too large");
   c.max_body = 8388608;
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/bomb")));
-  t_ok("same body under a larger limit", r != (HttpReply*)0 && r->body.length == 4194304);
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/bomb")));
+  t_ok("same body under a larger limit", r != (FetchReply*)0 && r->body.length == 4194304);
   c.max_body = HTTP_CLIENT_MAX_BODY;
-  t_str("the connection still works", body_of(http_client_get(&c, a, srv_url(a, "/gzip"))), TEXT);
+  t_str("the connection still works", body_of(fetch_client_get(&c, a, srv_url(a, "/gzip"))), TEXT);
 
   // switched off
   c.decompress = 0;
   n0 = srv_requests();
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/gzip")));
-  t_ok("raw gzip bytes", r != (HttpReply*)0 && r->body.length == (uint64)g_gzip.len && r->body != TEXT);
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/gzip")));
+  t_ok("raw gzip bytes", r != (FetchReply*)0 && r->body.length == (uint64)g_gzip.len && r->body != TEXT);
   t_str("no Accept-Encoding", srv_log_header(n0, "Accept-Encoding"), "");
-  t_ok("Content-Encoding kept", r != (HttpReply*)0 && http_header_find(r->headers, r->nheaders, "content-encoding", 0) >= 0);
+  t_ok("Content-Encoding kept", r != (FetchReply*)0 && http_header_find(r->headers, r->nheaders, "content-encoding", 0) >= 0);
   c.decompress = 1;
 
   // a header of your own turns decoding off for that request
   var own: HttpHeader[1];
   own[0].name = "Accept-Encoding";
   own[0].value = "gzip";
-  r = reply_of(http_client_request(&c, a, "GET", srv_url(a, "/gzip"), &own[0], 1, ""));
-  t_ok("own Accept-Encoding", r != (HttpReply*)0 && r->body.length == (uint64)g_gzip.len);
+  r = reply_of(fetch_client_request(&c, a, "GET", srv_url(a, "/gzip"), &own[0], 1, ""));
+  t_ok("own Accept-Encoding", r != (FetchReply*)0 && r->body.length == (uint64)g_gzip.len);
 
-  http_client_free(&c);
+  fetch_client_free(&c);
   press_buf_free(&g_gzip);
   press_buf_free(&g_zlib);
   press_buf_free(&g_raw);

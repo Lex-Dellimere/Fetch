@@ -1,6 +1,6 @@
 // https against a local mtls server: certificate checks, SNI, ALPN,
 // connection reuse, large bodies, cookies and redirects.
-import "http/http";
+import "fetch/fetch";
 import "mtls/mtls";
 import "server";
 import "tutil";
@@ -39,14 +39,14 @@ fn page(r: SrvReq*) -> int32 {
   return 0;
 }
 
-fn reply_of(r: Result<HttpReply*, string>) -> HttpReply* {
+fn reply_of(r: Result<FetchReply*, string>) -> FetchReply* {
   match (r) {
     case Ok(x): { return x; }
-    case Err(e): { return (HttpReply*)0; }
+    case Err(e): { return (FetchReply*)0; }
   }
 }
 
-fn err_of(r: Result<HttpReply*, string>) -> string {
+fn err_of(r: Result<FetchReply*, string>) -> string {
   match (r) {
     case Ok(x): { return ""; }
     case Err(e): { return e; }
@@ -64,28 +64,28 @@ fn main() -> int32 {
   var scfg: MtlsConfig;
   mtls_config_init(&scfg);
   t_eq("server cert", (int64)mtls_config_set_cert_pem(&scfg, chain.chars, (int64)chain.length, key.chars, (int64)key.length), 0);
-  mtls_config_add_alpn(&scfg, "http/1.1");
+  mtls_config_add_alpn(&scfg, "fetch/1.1");
   srv_start_tls(&page, &scfg);
 
   var roots: MtlsRoots;
   mtls_roots_init(&roots);
   t_eq("test CA", (int64)mtls_roots_add_pem(&roots, ca.chars, (int64)ca.length), 1);
   var a: Arena* = arena_init((int64)0);
-  var c: HttpClient;
-  http_client_init(&c);
+  var c: FetchClient;
+  fetch_client_init(&c);
   c.tls.roots = &roots;
 
-  var r: HttpReply* = reply_of(http_client_get(&c, a, url(a, "127.0.0.1", "/hello")));
-  t_ok("get", r != (HttpReply*)0 && r->status == 200 && r->body == "hello over tls" && r->reused == 0);
-  t_str("ALPN", srv_alpn(0), "http/1.1");
-  r = reply_of(http_client_get(&c, a, url(a, "127.0.0.1", "/hello")));
-  t_ok("reused", r != (HttpReply*)0 && r->body == "hello over tls" && r->reused == 1);
+  var r: FetchReply* = reply_of(fetch_client_get(&c, a, url(a, "127.0.0.1", "/hello")));
+  t_ok("get", r != (FetchReply*)0 && r->status == 200 && r->body == "hello over tls" && r->reused == 0);
+  t_str("ALPN", srv_alpn(0), "fetch/1.1");
+  r = reply_of(fetch_client_get(&c, a, url(a, "127.0.0.1", "/hello")));
+  t_ok("reused", r != (FetchReply*)0 && r->body == "hello over tls" && r->reused == 1);
   t_eq("one TLS connection", (int64)srv_accepts(), 1);
   t_str("Host header has the port", srv_log_header(0, "Host"), "127.0.0.1:{srv_port()}");
 
   // the host name is the SNI, and a different host is a different connection
-  r = reply_of(http_client_get(&c, a, url(a, "localhost", "/hello")));
-  t_ok("localhost", r != (HttpReply*)0 && r->status == 200 && r->reused == 0);
+  r = reply_of(fetch_client_get(&c, a, url(a, "localhost", "/hello")));
+  t_ok("localhost", r != (FetchReply*)0 && r->status == 200 && r->reused == 0);
   t_eq("a second connection", (int64)srv_accepts(), 2);
   t_str("SNI", srv_sni(1), "localhost");
 
@@ -94,61 +94,61 @@ fn main() -> int32 {
   var chunk: string = "0123456789abcdef";
   for i in 0..13 { chunk = chunk + chunk; }
   big = chunk;
-  r = reply_of(http_client_request(&c, a, "POST", url(a, "localhost", "/echo"), (HttpHeader*)0, 0, big));
-  t_ok("large POST echoed", r != (HttpReply*)0 && r->body == big && r->reused == 1);
-  r = reply_of(http_client_get(&c, a, url(a, "localhost", "/big")));
-  t_ok("large GET", r != (HttpReply*)0 && r->body.length == 262144 && r->reused == 1);
-  r = reply_of(http_client_get(&c, a, url(a, "localhost", "/chunked")));
-  t_ok("chunked", r != (HttpReply*)0 && r->body == "hello world");
+  r = reply_of(fetch_client_request(&c, a, "POST", url(a, "localhost", "/echo"), (HttpHeader*)0, 0, big));
+  t_ok("large POST echoed", r != (FetchReply*)0 && r->body == big && r->reused == 1);
+  r = reply_of(fetch_client_get(&c, a, url(a, "localhost", "/big")));
+  t_ok("large GET", r != (FetchReply*)0 && r->body.length == 262144 && r->reused == 1);
+  r = reply_of(fetch_client_get(&c, a, url(a, "localhost", "/chunked")));
+  t_ok("chunked", r != (FetchReply*)0 && r->body == "hello world");
   t_eq("still two connections", (int64)srv_accepts(), 2);
 
   // redirects stay on TLS, and a downgrade is refused
-  r = reply_of(http_client_get(&c, a, url(a, "localhost", "/go")));
-  t_ok("redirect", r != (HttpReply*)0 && r->body == "hello over tls" && r->redirects == 1 && r->reused == 1);
-  t_str("downgrade", err_of(http_client_get(&c, a, url(a, "localhost", "/down"))), "redirect from https to http refused");
+  r = reply_of(fetch_client_get(&c, a, url(a, "localhost", "/go")));
+  t_ok("redirect", r != (FetchReply*)0 && r->body == "hello over tls" && r->redirects == 1 && r->reused == 1);
+  t_str("downgrade", err_of(fetch_client_get(&c, a, url(a, "localhost", "/down"))), "redirect from https to http refused");
   c.allow_downgrade = 1;
-  t_ok("downgrade allowed, then the connection fails", str_starts_with(err_of(http_client_get(&c, a, url(a, "localhost", "/down"))), "connect failed") == 1);
+  t_ok("downgrade allowed, then the connection fails", str_starts_with(err_of(fetch_client_get(&c, a, url(a, "localhost", "/down"))), "connect failed") == 1);
   c.allow_downgrade = 0;
 
   // Secure cookies are kept from https and sent only to https
-  var jar: HttpCookieJar;
-  http_cookie_jar_init(&jar);
+  var jar: FetchCookieJar;
+  fetch_cookie_jar_init(&jar);
   c.jar = &jar;
-  http_client_get(&c, a, url(a, "localhost", "/cookie"));
-  t_eq("both stored", (int64)http_cookie_jar_count(&jar), 2);
-  t_str("both sent", body_text(http_client_get(&c, a, url(a, "localhost", "/cookies"))), "s=1; p=2");
-  var hc: HttpCookie* = http_cookie_jar_find(&jar, "s", "localhost", "/");
-  t_ok("Secure flag", hc != (HttpCookie*)0 && hc->secure == 1);
-  c.jar = (HttpCookieJar*)0;
-  http_cookie_jar_free(&jar);
+  fetch_client_get(&c, a, url(a, "localhost", "/cookie"));
+  t_eq("both stored", (int64)fetch_cookie_jar_count(&jar), 2);
+  t_str("both sent", body_text(fetch_client_get(&c, a, url(a, "localhost", "/cookies"))), "s=1; p=2");
+  var hc: FetchCookie* = fetch_cookie_jar_find(&jar, "s", "localhost", "/");
+  t_ok("Secure flag", hc != (FetchCookie*)0 && hc->secure == 1);
+  c.jar = (FetchCookieJar*)0;
+  fetch_cookie_jar_free(&jar);
 
   // timeout on a TLS connection
   c.timeout_ms = 150;
   var t0: int64 = net_now_ms();
-  t_str("timeout", err_of(http_client_get(&c, a, url(a, "localhost", "/slow"))), "timed out");
+  t_str("timeout", err_of(fetch_client_get(&c, a, url(a, "localhost", "/slow"))), "timed out");
   t_ok("timeout was quick", net_now_ms() - t0 < 500);
   c.timeout_ms = 30000;
-  t_str("a fresh connection works after", body_text(http_client_get(&c, a, url(a, "localhost", "/hello"))), "hello over tls");
-  http_client_free(&c);
+  t_str("a fresh connection works after", body_text(fetch_client_get(&c, a, url(a, "localhost", "/hello"))), "hello over tls");
+  fetch_client_free(&c);
 
   // without the test CA the certificate is refused
-  var d: HttpClient;
-  http_client_init(&d);
-  var e: string = err_of(http_client_get(&d, a, url(a, "127.0.0.1", "/hello")));
+  var d: FetchClient;
+  fetch_client_init(&d);
+  var e: string = err_of(fetch_client_get(&d, a, url(a, "127.0.0.1", "/hello")));
   t_ok("untrusted: " + e, str_starts_with(e, "certificate refused: ") == 1);
-  http_client_free(&d);
+  fetch_client_free(&d);
 
   // unless checks are off
-  http_client_init(&d);
+  fetch_client_init(&d);
   d.tls.insecure = 1;
-  t_str("insecure", body_text(http_client_get(&d, a, url(a, "127.0.0.1", "/hello"))), "hello over tls");
-  http_client_free(&d);
+  t_str("insecure", body_text(fetch_client_get(&d, a, url(a, "127.0.0.1", "/hello"))), "hello over tls");
+  fetch_client_free(&d);
 
   mtls_roots_free(&roots);
   return t_done("https");
 }
 
-fn body_text(r: Result<HttpReply*, string>) -> string {
+fn body_text(r: Result<FetchReply*, string>) -> string {
   match (r) {
     case Ok(x): { return "" + x->body; }
     case Err(e): { return "ERR:" + e; }

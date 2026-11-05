@@ -1,6 +1,6 @@
 // Redirects through the client: each status, the method and body rules,
 // credentials across hosts, relative targets, loops and limits.
-import "http/http";
+import "fetch/fetch";
 import "server";
 import "tutil";
 import "std/http";
@@ -63,14 +63,14 @@ fn page(r: SrvReq*) -> int32 {
   return 0;
 }
 
-fn reply_of(r: Result<HttpReply*, string>) -> HttpReply* {
+fn reply_of(r: Result<FetchReply*, string>) -> FetchReply* {
   match (r) {
     case Ok(x): { return x; }
-    case Err(e): { return (HttpReply*)0; }
+    case Err(e): { return (FetchReply*)0; }
   }
 }
 
-fn err_of(r: Result<HttpReply*, string>) -> string {
+fn err_of(r: Result<FetchReply*, string>) -> string {
   match (r) {
     case Ok(x): { return ""; }
     case Err(e): { return e; }
@@ -80,27 +80,27 @@ fn err_of(r: Result<HttpReply*, string>) -> string {
 fn main() -> int32 {
   var port: int32 = srv_start(&page);
   var a: Arena* = arena_init((int64)0);
-  var c: HttpClient;
-  http_client_init(&c);
+  var c: FetchClient;
+  fetch_client_init(&c);
 
   // the status codes
-  var r: HttpReply* = reply_of(http_client_get(&c, a, srv_url(a, "/r301")));
-  t_ok("301 GET", r != (HttpReply*)0 && r->status == 200 && r->body == "GET " && r->redirects == 1);
+  var r: FetchReply* = reply_of(fetch_client_get(&c, a, srv_url(a, "/r301")));
+  t_ok("301 GET", r != (FetchReply*)0 && r->status == 200 && r->body == "GET " && r->redirects == 1);
   t_str("final url", r->url, srv_url(a, "/final"));
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/r302")));
-  t_ok("302 GET", r != (HttpReply*)0 && r->body == "GET ");
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/r303")));
-  t_ok("303 GET", r != (HttpReply*)0 && r->body == "GET ");
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/r307")));
-  t_ok("307 GET", r != (HttpReply*)0 && r->body == "GET ");
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/r308")));
-  t_ok("308 GET", r != (HttpReply*)0 && r->body == "GET ");
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/r300")));
-  t_ok("300 not followed", r != (HttpReply*)0 && r->status == 300 && r->redirects == 0);
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/r304")));
-  t_ok("304 not followed", r != (HttpReply*)0 && r->status == 304);
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/nolocation")));
-  t_ok("no Location", r != (HttpReply*)0 && r->status == 302 && r->body == "stay");
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/r302")));
+  t_ok("302 GET", r != (FetchReply*)0 && r->body == "GET ");
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/r303")));
+  t_ok("303 GET", r != (FetchReply*)0 && r->body == "GET ");
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/r307")));
+  t_ok("307 GET", r != (FetchReply*)0 && r->body == "GET ");
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/r308")));
+  t_ok("308 GET", r != (FetchReply*)0 && r->body == "GET ");
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/r300")));
+  t_ok("300 not followed", r != (FetchReply*)0 && r->status == 300 && r->redirects == 0);
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/r304")));
+  t_ok("304 not followed", r != (FetchReply*)0 && r->status == 304);
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/nolocation")));
+  t_ok("no Location", r != (FetchReply*)0 && r->status == 302 && r->body == "stay");
 
   // method and body
   var hdr: HttpHeader[2];
@@ -109,55 +109,55 @@ fn main() -> int32 {
   hdr[1].name = "X-Keep";
   hdr[1].value = "1";
   var n0: int32 = srv_requests();
-  r = reply_of(http_client_request(&c, a, "POST", srv_url(a, "/r301"), &hdr[0], 2, "payload"));
-  t_ok("301 POST becomes GET", r != (HttpReply*)0 && r->body == "GET ");
+  r = reply_of(fetch_client_request(&c, a, "POST", srv_url(a, "/r301"), &hdr[0], 2, "payload"));
+  t_ok("301 POST becomes GET", r != (FetchReply*)0 && r->body == "GET ");
   t_str("no body header after", srv_log_header(n0 + 1, "Content-Length"), "");
   t_str("no content type after", srv_log_header(n0 + 1, "Content-Type"), "");
   t_str("other headers stay", srv_log_header(n0 + 1, "X-Keep"), "1");
-  r = reply_of(http_client_request(&c, a, "POST", srv_url(a, "/r302"), &hdr[0], 2, "payload"));
-  t_ok("302 POST becomes GET", r != (HttpReply*)0 && r->body == "GET ");
-  r = reply_of(http_client_request(&c, a, "POST", srv_url(a, "/r303"), &hdr[0], 2, "payload"));
-  t_ok("303 POST becomes GET", r != (HttpReply*)0 && r->body == "GET ");
-  r = reply_of(http_client_request(&c, a, "PUT", srv_url(a, "/r303"), &hdr[0], 2, "payload"));
-  t_ok("303 PUT becomes GET", r != (HttpReply*)0 && r->body == "GET ");
+  r = reply_of(fetch_client_request(&c, a, "POST", srv_url(a, "/r302"), &hdr[0], 2, "payload"));
+  t_ok("302 POST becomes GET", r != (FetchReply*)0 && r->body == "GET ");
+  r = reply_of(fetch_client_request(&c, a, "POST", srv_url(a, "/r303"), &hdr[0], 2, "payload"));
+  t_ok("303 POST becomes GET", r != (FetchReply*)0 && r->body == "GET ");
+  r = reply_of(fetch_client_request(&c, a, "PUT", srv_url(a, "/r303"), &hdr[0], 2, "payload"));
+  t_ok("303 PUT becomes GET", r != (FetchReply*)0 && r->body == "GET ");
   n0 = srv_requests();
-  r = reply_of(http_client_request(&c, a, "HEAD", srv_url(a, "/r303"), &hdr[0], 0, ""));
-  t_ok("303 HEAD stays HEAD", r != (HttpReply*)0 && r->status == 200 && srv_log_verb(n0 + 1) == "HEAD");
-  r = reply_of(http_client_request(&c, a, "POST", srv_url(a, "/r307"), &hdr[0], 2, "payload"));
-  t_ok("307 POST keeps method and body", r != (HttpReply*)0 && r->body == "POST payload");
+  r = reply_of(fetch_client_request(&c, a, "HEAD", srv_url(a, "/r303"), &hdr[0], 0, ""));
+  t_ok("303 HEAD stays HEAD", r != (FetchReply*)0 && r->status == 200 && srv_log_verb(n0 + 1) == "HEAD");
+  r = reply_of(fetch_client_request(&c, a, "POST", srv_url(a, "/r307"), &hdr[0], 2, "payload"));
+  t_ok("307 POST keeps method and body", r != (FetchReply*)0 && r->body == "POST payload");
   n0 = srv_requests();
-  r = reply_of(http_client_request(&c, a, "POST", srv_url(a, "/r308"), &hdr[0], 2, "payload"));
-  t_ok("308 POST keeps method and body", r != (HttpReply*)0 && r->body == "POST payload");
+  r = reply_of(fetch_client_request(&c, a, "POST", srv_url(a, "/r308"), &hdr[0], 2, "payload"));
+  t_ok("308 POST keeps method and body", r != (FetchReply*)0 && r->body == "POST payload");
   t_str("308 keeps Content-Type", srv_log_header(n0 + 1, "Content-Type"), "text/plain");
   t_str("308 sends Content-Length", srv_log_header(n0 + 1, "Content-Length"), "7");
-  r = reply_of(http_client_request(&c, a, "PUT", srv_url(a, "/r301"), &hdr[0], 2, "payload"));
-  t_ok("301 PUT keeps method and body", r != (HttpReply*)0 && r->body == "PUT payload");
-  r = reply_of(http_client_request(&c, a, "DELETE", srv_url(a, "/r302"), (HttpHeader*)0, 0, ""));
-  t_ok("302 DELETE keeps the method", r != (HttpReply*)0 && r->body == "DELETE ");
+  r = reply_of(fetch_client_request(&c, a, "PUT", srv_url(a, "/r301"), &hdr[0], 2, "payload"));
+  t_ok("301 PUT keeps method and body", r != (FetchReply*)0 && r->body == "PUT payload");
+  r = reply_of(fetch_client_request(&c, a, "DELETE", srv_url(a, "/r302"), (HttpHeader*)0, 0, ""));
+  t_ok("302 DELETE keeps the method", r != (FetchReply*)0 && r->body == "DELETE ");
 
   // Location forms
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/query")));
-  t_ok("query kept, fragment dropped", r != (HttpReply*)0 && r->url == srv_url(a, "/final?q=1"));
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/relative")));
-  t_ok("relative", r != (HttpReply*)0 && r->status == 200 && r->url == srv_url(a, "/sub/page"));
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/dir/up")));
-  t_ok("dot dot", r != (HttpReply*)0 && r->status == 200 && r->url == srv_url(a, "/sub/page"));
-  t_str("ftp target", err_of(http_client_get(&c, a, srv_url(a, "/ftp"))), "bad redirect location");
-  t_str("empty target", err_of(http_client_get(&c, a, srv_url(a, "/empty"))), "bad redirect location");
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/query")));
+  t_ok("query kept, fragment dropped", r != (FetchReply*)0 && r->url == srv_url(a, "/final?q=1"));
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/relative")));
+  t_ok("relative", r != (FetchReply*)0 && r->status == 200 && r->url == srv_url(a, "/sub/page"));
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/dir/up")));
+  t_ok("dot dot", r != (FetchReply*)0 && r->status == 200 && r->url == srv_url(a, "/sub/page"));
+  t_str("ftp target", err_of(fetch_client_get(&c, a, srv_url(a, "/ftp"))), "bad redirect location");
+  t_str("empty target", err_of(fetch_client_get(&c, a, srv_url(a, "/empty"))), "bad redirect location");
 
   // limits
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/chain/0")));
-  t_ok("chain of five", r != (HttpReply*)0 && r->body == "end of chain" && r->redirects == 5);
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/chain/0")));
+  t_ok("chain of five", r != (FetchReply*)0 && r->body == "end of chain" && r->redirects == 5);
   c.max_redirects = 4;
-  t_str("chain over the limit", err_of(http_client_get(&c, a, srv_url(a, "/chain/0"))), "too many redirects");
+  t_str("chain over the limit", err_of(fetch_client_get(&c, a, srv_url(a, "/chain/0"))), "too many redirects");
   c.max_redirects = 5;
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/chain/0")));
-  t_ok("chain exactly at the limit", r != (HttpReply*)0 && r->redirects == 5);
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/chain/0")));
+  t_ok("chain exactly at the limit", r != (FetchReply*)0 && r->redirects == 5);
   c.max_redirects = 10;
-  t_str("loop", err_of(http_client_get(&c, a, srv_url(a, "/loop"))), "too many redirects");
+  t_str("loop", err_of(fetch_client_get(&c, a, srv_url(a, "/loop"))), "too many redirects");
   c.max_redirects = 0;
-  r = reply_of(http_client_get(&c, a, srv_url(a, "/r302")));
-  t_ok("zero follows none", r != (HttpReply*)0 && r->status == 302 && r->redirects == 0);
+  r = reply_of(fetch_client_get(&c, a, srv_url(a, "/r302")));
+  t_ok("zero follows none", r != (FetchReply*)0 && r->status == 302 && r->redirects == 0);
   c.max_redirects = 10;
 
   // credentials go only to the host they were meant for
@@ -169,23 +169,23 @@ fn main() -> int32 {
   cred[2].name = "X-Keep";
   cred[2].value = "1";
   n0 = srv_requests();
-  r = reply_of(http_client_request(&c, a, "GET", srv_url(a, "/samehost"), &cred[0], 3, ""));
-  t_ok("same host", r != (HttpReply*)0 && r->status == 200);
+  r = reply_of(fetch_client_request(&c, a, "GET", srv_url(a, "/samehost"), &cred[0], 3, ""));
+  t_ok("same host", r != (FetchReply*)0 && r->status == 200);
   t_str("same host keeps Authorization", srv_log_header(n0 + 1, "Authorization"), "Bearer secret");
   t_str("same host keeps Cookie", srv_log_header(n0 + 1, "Cookie"), "sid=1");
   n0 = srv_requests();
-  r = reply_of(http_client_request(&c, a, "GET", srv_url(a, "/cross"), &cred[0], 3, ""));
-  t_ok("other host", r != (HttpReply*)0 && r->status == 200);
+  r = reply_of(fetch_client_request(&c, a, "GET", srv_url(a, "/cross"), &cred[0], 3, ""));
+  t_ok("other host", r != (FetchReply*)0 && r->status == 200);
   t_str("first hop sent Authorization", srv_log_header(n0, "Authorization"), "Bearer secret");
   t_str("other host loses Authorization", srv_log_header(n0 + 1, "Authorization"), "");
   t_str("other host loses Cookie", srv_log_header(n0 + 1, "Cookie"), "");
   t_str("other host keeps the rest", srv_log_header(n0 + 1, "X-Keep"), "1");
   t_str("Host follows", srv_log_header(n0 + 1, "Host"), "localhost:{port}");
   n0 = srv_requests();
-  r = reply_of(http_client_request(&c, a, "POST", srv_url(a, "/cross307"), &cred[0], 3, "p"));
-  t_ok("307 across hosts", r != (HttpReply*)0 && r->body == "POST p");
+  r = reply_of(fetch_client_request(&c, a, "POST", srv_url(a, "/cross307"), &cred[0], 3, "p"));
+  t_ok("307 across hosts", r != (FetchReply*)0 && r->body == "POST p");
   t_str("307 loses Authorization too", srv_log_header(n0 + 1, "Authorization"), "");
 
-  http_client_free(&c);
+  fetch_client_free(&c);
   return t_done("redirect_client");
 }

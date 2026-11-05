@@ -1,5 +1,5 @@
 // A certificate for another name is refused, even when the CA is trusted.
-import "http/http";
+import "fetch/fetch";
 import "mtls/mtls";
 import "server";
 import "tutil";
@@ -12,7 +12,7 @@ fn page(r: SrvReq*) -> int32 {
   return 0;
 }
 
-fn err_of(r: Result<HttpReply*, string>) -> string {
+fn err_of(r: Result<FetchReply*, string>) -> string {
   match (r) {
     case Ok(x): { return ""; }
     case Err(e): { return e; }
@@ -32,21 +32,21 @@ fn main() -> int32 {
   mtls_roots_init(&roots);
   mtls_roots_add_pem(&roots, ca.chars, (int64)ca.length);
   var a: Arena* = arena_init((int64)0);
-  var c: HttpClient;
-  http_client_init(&c);
+  var c: FetchClient;
+  fetch_client_init(&c);
   c.tls.roots = &roots;
 
-  var e: string = err_of(http_client_get(&c, a, "https://127.0.0.1:{srv_port()}/"));
+  var e: string = err_of(fetch_client_get(&c, a, "https://127.0.0.1:{srv_port()}/"));
   t_ok("name mismatch: " + e, str_starts_with(e, "certificate refused: ") == 1);
-  t_eq("nothing kept", (int64)http_pool_count(&c.pool), 0);
+  t_eq("nothing kept", (int64)fetch_pool_count(&c.pool), 0);
 
   // with the checks off the same server answers
-  var d: HttpClient;
-  http_client_init(&d);
+  var d: FetchClient;
+  fetch_client_init(&d);
   d.tls.insecure = 1;
-  t_str("insecure accepts it", err_of(http_client_get(&d, a, "https://127.0.0.1:{srv_port()}/")), "");
-  http_client_free(&d);
-  http_client_free(&c);
+  t_str("insecure accepts it", err_of(fetch_client_get(&d, a, "https://127.0.0.1:{srv_port()}/")), "");
+  fetch_client_free(&d);
+  fetch_client_free(&c);
   mtls_roots_free(&roots);
   return t_done("https_name");
 }

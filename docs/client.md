@@ -1,16 +1,16 @@
 # The client
 
 ```mettle
-import "http/http";
+import "fetch/fetch";
 ```
 
-## HttpClient
+## FetchClient
 
 ```mettle
-var c: HttpClient;
-http_client_init(&c);
+var c: FetchClient;
+fetch_client_init(&c);
 // set fields
-http_client_free(&c);
+fetch_client_free(&c);
 ```
 
 | Field | Default | Meaning |
@@ -21,7 +21,7 @@ http_client_free(&c);
 | `allow_downgrade` | 0 | 1 lets a redirect go from https to http. |
 | `decompress` | 1 | 1 asks for gzip and deflate and decodes them. |
 | `keep_alive` | 1 | 1 keeps connections for reuse. |
-| `jar` | none | An `HttpCookieJar*`. When set, cookies are stored and sent. |
+| `jar` | none | An `FetchCookieJar*`. When set, cookies are stored and sent. |
 | `pool` | | Limits of the idle pool, below. |
 | `tls` | | https settings, below. |
 
@@ -30,8 +30,8 @@ Counters you can read: `dials` (connections opened), `reuses` (requests sent on 
 ## Requests
 
 ```mettle
-http_client_get(c, arena, url) -> Result<HttpReply*, string>
-http_client_request(c, arena, verb, url, headers, nheaders, body) -> Result<HttpReply*, string>
+fetch_client_get(c, arena, url) -> Result<FetchReply*, string>
+fetch_client_request(c, arena, verb, url, headers, nheaders, body) -> Result<FetchReply*, string>
 ```
 
 The URL is `http://` or `https://`. `headers` are extra request headers (`HttpHeader` from `std/http`). The client adds `Host`, `Content-Length` when there is a body or the method is POST, PUT or PATCH, `Accept-Encoding` and `Cookie`. A header of yours with the same name replaces the client's. `Content-Length`, `Transfer-Encoding` and `Connection` belong to the client, and passing them is an error. Header names and values are checked, so a value cannot carry a second header.
@@ -39,7 +39,7 @@ The URL is `http://` or `https://`. `headers` are extra request headers (`HttpHe
 The error is a short message. For a failed connection or handshake it ends with the reason.
 
 ```mettle
-export struct HttpReply {
+export struct FetchReply {
   status: int32;
   nheaders: int32;
   reason: string;
@@ -63,7 +63,7 @@ After a response the connection goes back to the pool when the response allows i
 | `max_idle_total` | 32 | Idle connections in all. The oldest goes first. |
 | `idle_timeout_ms` | 30000 | An idle connection older than this is closed. |
 
-Idle connections are checked when the client is used. A connection that the server closed in the meantime is thrown away before it is used. Call `http_client_prune(&c)` to close the old ones without sending a request. `http_client_free` closes them all.
+Idle connections are checked when the client is used. A connection that the server closed in the meantime is thrown away before it is used. Call `fetch_client_prune(&c)` to close the old ones without sending a request. `fetch_client_free` closes them all.
 
 A kept connection can still be closed by the server at the moment a request goes out. When that happens before any byte of the answer came back, GET, HEAD, PUT, DELETE, OPTIONS and TRACE are sent once more on a new connection. Other methods are not, and the error is returned.
 
@@ -83,7 +83,7 @@ When the body is dropped, `Content-Type`, `Content-Encoding` and `Content-Langua
 
 A redirect from https to http is the error `redirect from https to http refused`, unless `allow_downgrade` is 1.
 
-`Location` may be absolute, start with `//`, start with `/`, be a query, or be relative to the path. `http_url_resolve` does this and is in `http/redirect`. The fragment is dropped. A `Location` with another scheme is the error `bad redirect location`.
+`Location` may be absolute, start with `//`, start with `/`, be a query, or be relative to the path. `fetch_url_resolve` does this and is in `fetch/redirect`. The fragment is dropped. A `Location` with another scheme is the error `bad redirect location`.
 
 ## gzip and deflate
 
@@ -108,18 +108,18 @@ A TLS connection that ends without a close_notify is treated as a plain end of s
 
 ## Error codes
 
-`http/error` adds these to the `HTTP_ERR_*` codes of `std/http`. `http_client_error_text(code)` gives the words.
+`fetch/error` adds these to the `HTTP_ERR_*` codes of `std/http`. `fetch_client_error_text(code)` gives the words.
 
 | Code | Text |
 |---|---|
-| `HTTP_CLIENT_ERR_REDIRECTS` | too many redirects |
-| `HTTP_CLIENT_ERR_DOWNGRADE` | redirect from https to http refused |
-| `HTTP_CLIENT_ERR_LOCATION` | bad redirect location |
-| `HTTP_CLIENT_ERR_ENCODING` | bad gzip or deflate data |
-| `HTTP_CLIENT_ERR_SCHEME` | not an http URL |
-| `HTTP_CLIENT_ERR_HANDSHAKE` | TLS handshake failed |
-| `HTTP_CLIENT_ERR_CERT` | certificate refused |
+| `FETCH_CLIENT_ERR_REDIRECTS` | too many redirects |
+| `FETCH_CLIENT_ERR_DOWNGRADE` | redirect from https to http refused |
+| `FETCH_CLIENT_ERR_LOCATION` | bad redirect location |
+| `FETCH_CLIENT_ERR_ENCODING` | bad gzip or deflate data |
+| `FETCH_CLIENT_ERR_SCHEME` | not an http URL |
+| `FETCH_CLIENT_ERR_HANDSHAKE` | TLS handshake failed |
+| `FETCH_CLIENT_ERR_CERT` | certificate refused |
 
-## HttpStream
+## FetchStream
 
-The client reads and writes through an `HttpStream`: a context pointer, read, write and close functions, and a socket to poll (`fd`, or -1 when the stream waits for itself). `read` and `write` return a count, 0 at the end of the stream, or a negative error. `http_stream_plain(fd)` wraps a socket. The TLS connection is another `HttpStream`.
+The client reads and writes through an `FetchStream`: a context pointer, read, write and close functions, and a socket to poll (`fd`, or -1 when the stream waits for itself). `read` and `write` return a count, 0 at the end of the stream, or a negative error. `fetch_stream_plain(fd)` wraps a socket. The TLS connection is another `FetchStream`.

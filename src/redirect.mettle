@@ -6,13 +6,13 @@ import "std/arena";
 import "std/strbuf";
 import "std/http";
 
-export fn http_redirect_follows(status: int32) -> bool {
+export fn fetch_redirect_follows(status: int32) -> bool {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
 
 // The method of the request that follows a redirect. 303 turns anything but
 // HEAD into GET, and 301 and 302 do so for POST. 307 and 308 keep the method.
-export fn http_redirect_method(status: int32, verb: string) -> string {
+export fn fetch_redirect_method(status: int32, verb: string) -> string {
   if (status == 303) {
     if (verb == "HEAD") { return verb; }
     return "GET";
@@ -22,7 +22,7 @@ export fn http_redirect_method(status: int32, verb: string) -> string {
 }
 
 // False when the redirected request has no body: the method changed to GET.
-export fn http_redirect_keeps_body(status: int32, verb: string) -> bool {
+export fn fetch_redirect_keeps_body(status: int32, verb: string) -> bool {
   if (status == 303) { return false; }
   if ((status == 301 || status == 302) && verb == "POST") { return false; }
   return true;
@@ -43,7 +43,7 @@ fn rd_ieq(a: string, b: string) -> bool {
 }
 
 // Same host name (any case) and same port. Credentials go no further than this.
-export fn http_url_same_host(a: HttpUrl*, b: HttpUrl*) -> bool {
+export fn fetch_url_same_host(a: HttpUrl*, b: HttpUrl*) -> bool {
   return a->port == b->port && rd_ieq(a->host, b->host);
 }
 
@@ -51,7 +51,7 @@ export fn http_url_same_host(a: HttpUrl*, b: HttpUrl*) -> bool {
 // follow a redirect. drop_auth removes Authorization, Cookie and
 // Proxy-Authorization; drop_body removes the headers that describe a body.
 // Returns the count kept.
-export fn http_redirect_headers(h: HttpHeader*, n: int32, out: HttpHeader*, drop_auth: bool, drop_body: bool) -> int32 {
+export fn fetch_redirect_headers(h: HttpHeader*, n: int32, out: HttpHeader*, drop_auth: bool, drop_body: bool) -> int32 {
   var kept: int32 = 0;
   var i: int32 = 0;
   while (i < n) {
@@ -156,7 +156,7 @@ fn rd_origin(sb: StrBuf*, u: HttpUrl*) {
 // 5.2) and appends the absolute URL to sb. The fragment is dropped. Needs an
 // arena for scratch space. Returns 0, or HTTP_ERR_URL for an empty value, a
 // scheme other than http and https, or an out-of-memory.
-export fn http_url_resolve(arena: Arena*, base: HttpUrl*, location: string, sb: StrBuf*) -> int64 {
+export fn fetch_url_resolve(arena: Arena*, base: HttpUrl*, location: string, sb: StrBuf*) -> int64 {
   var a: int64 = 0;
   var b: int64 = (int64)location.length;
   while (a < b && ((int32)location.chars[a] == 32 || (int32)location.chars[a] == 9)) { a = a + 1; }

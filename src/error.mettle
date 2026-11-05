@@ -2,15 +2,15 @@
 
 import "std/http";
 
-export const HTTP_CLIENT_ERR_REDIRECTS = -100;    // more redirects than max_redirects
-export const HTTP_CLIENT_ERR_DOWNGRADE = -101;    // a redirect from https to http
-export const HTTP_CLIENT_ERR_LOCATION = -102;     // a Location that is not an http or https URL
-export const HTTP_CLIENT_ERR_ENCODING = -103;     // gzip or deflate data that does not decode
-export const HTTP_CLIENT_ERR_SCHEME = -104;       // the URL is not http or https
-export const HTTP_CLIENT_ERR_HANDSHAKE = -105;    // the TLS handshake failed
-export const HTTP_CLIENT_ERR_CERT = -106;         // the server's certificate was refused
+export const FETCH_CLIENT_ERR_REDIRECTS = -100;    // more redirects than max_redirects
+export const FETCH_CLIENT_ERR_DOWNGRADE = -101;    // a redirect from https to http
+export const FETCH_CLIENT_ERR_LOCATION = -102;     // a Location that is not an http or https URL
+export const FETCH_CLIENT_ERR_ENCODING = -103;     // gzip or deflate data that does not decode
+export const FETCH_CLIENT_ERR_SCHEME = -104;       // the URL is not http or https
+export const FETCH_CLIENT_ERR_HANDSHAKE = -105;    // the TLS handshake failed
+export const FETCH_CLIENT_ERR_CERT = -106;         // the server's certificate was refused
 
-export fn http_client_error_text(code: int64) -> string {
+export fn fetch_client_error_text(code: int64) -> string {
   switch (code) {
     case -100: { return "too many redirects"; }
     case -101: { return "redirect from https to http refused"; }

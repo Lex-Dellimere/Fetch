@@ -5,7 +5,7 @@
 
 import "std/socket";
 
-export struct HttpStream {
+export struct FetchStream {
   ctx: rawptr;
   read: fn(rawptr, uint8*, int64) -> int64;
   write: fn(rawptr, uint8*, int64) -> int64;
@@ -27,8 +27,8 @@ fn hs_plain_close(ctx: rawptr) -> int64 {
 }
 
 // Wraps a connected socket. close closes the socket.
-export fn http_stream_plain(fd: int64) -> HttpStream {
-  var s: HttpStream;
+export fn fetch_stream_plain(fd: int64) -> FetchStream {
+  var s: FetchStream;
   s.ctx = (rawptr)fd;
   s.read = &hs_plain_read;
   s.write = &hs_plain_write;
@@ -37,15 +37,15 @@ export fn http_stream_plain(fd: int64) -> HttpStream {
   return s;
 }
 
-export fn http_stream_read(s: HttpStream*, p: uint8*, n: int64) -> int64 {
+export fn fetch_stream_read(s: FetchStream*, p: uint8*, n: int64) -> int64 {
   return s->read(s->ctx, p, n);
 }
 
-export fn http_stream_write(s: HttpStream*, p: uint8*, n: int64) -> int64 {
+export fn fetch_stream_write(s: FetchStream*, p: uint8*, n: int64) -> int64 {
   return s->write(s->ctx, p, n);
 }
 
-export fn http_stream_close(s: HttpStream*) {
+export fn fetch_stream_close(s: FetchStream*) {
   s->close(s->ctx);
   s->fd = -1;
 }

@@ -1,6 +1,6 @@
 // https to a server that does not speak TLS. This is the error path only; a
 // real TLS server is in https_test.
-import "http/http";
+import "fetch/fetch";
 import "server";
 import "tutil";
 import "std/arena";
@@ -12,7 +12,7 @@ fn page(r: SrvReq*) -> int32 {
   return 0;
 }
 
-fn err_of(r: Result<HttpReply*, string>) -> string {
+fn err_of(r: Result<FetchReply*, string>) -> string {
   match (r) {
     case Ok(x): { return ""; }
     case Err(e): { return e; }
@@ -22,19 +22,19 @@ fn err_of(r: Result<HttpReply*, string>) -> string {
 fn main() -> int32 {
   srv_start(&page);
   var a: Arena* = arena_init((int64)0);
-  var c: HttpClient;
-  http_client_init(&c);
+  var c: FetchClient;
+  fetch_client_init(&c);
   c.timeout_ms = 2000;
-  var e: string = err_of(http_client_get(&c, a, "https://127.0.0.1:{srv_port()}/"));
+  var e: string = err_of(fetch_client_get(&c, a, "https://127.0.0.1:{srv_port()}/"));
   t_ok("handshake fails: " + e, str_starts_with(e, "TLS handshake failed") == 1);
-  t_eq("nothing kept", (int64)http_pool_count(&c.pool), 0);
+  t_eq("nothing kept", (int64)fetch_pool_count(&c.pool), 0);
 
   // http to the same server still works
-  var r: Result<HttpReply*, string> = http_client_get(&c, a, srv_url(a, "/"));
+  var r: Result<FetchReply*, string> = fetch_client_get(&c, a, srv_url(a, "/"));
   t_str("http works", err_of(r), "");
 
-  e = err_of(http_client_get(&c, a, "https://127.0.0.1:1/"));
+  e = err_of(fetch_client_get(&c, a, "https://127.0.0.1:1/"));
   t_ok("refused: " + e, str_starts_with(e, "connect failed: ") == 1);
-  http_client_free(&c);
+  fetch_client_free(&c);
   return t_done("https_plain");
 }

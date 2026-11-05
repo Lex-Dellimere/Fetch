@@ -1,5 +1,5 @@
 // Redirect rules and Location resolution.
-import "http/redirect";
+import "fetch/redirect";
 import "std/http";
 import "std/arena";
 import "std/strbuf";
@@ -10,7 +10,7 @@ fn resolve(base: string, loc: string) -> string {
   var u: HttpUrl;
   if (http_url_parse(base, &u) != 0) { return "bad base"; }
   var sb: StrBuf* = strbuf_new(a, 64);
-  var rc: int64 = http_url_resolve(a, &u, loc, sb);
+  var rc: int64 = fetch_url_resolve(a, &u, loc, sb);
   var out: string = "error";
   if (rc == 0) { out = "" + strbuf_finish_string(sb); }
   arena_free(a);
@@ -18,23 +18,23 @@ fn resolve(base: string, loc: string) -> string {
 }
 
 fn main() -> int32 {
-  t_ok("follows", http_redirect_follows(301) && http_redirect_follows(302) && http_redirect_follows(303) && http_redirect_follows(307) && http_redirect_follows(308));
-  t_ok("does not follow", !http_redirect_follows(200) && !http_redirect_follows(300) && !http_redirect_follows(304) && !http_redirect_follows(305) && !http_redirect_follows(404));
+  t_ok("follows", fetch_redirect_follows(301) && fetch_redirect_follows(302) && fetch_redirect_follows(303) && fetch_redirect_follows(307) && fetch_redirect_follows(308));
+  t_ok("does not follow", !fetch_redirect_follows(200) && !fetch_redirect_follows(300) && !fetch_redirect_follows(304) && !fetch_redirect_follows(305) && !fetch_redirect_follows(404));
 
-  t_str("303 POST", http_redirect_method(303, "POST"), "GET");
-  t_str("303 PUT", http_redirect_method(303, "PUT"), "GET");
-  t_str("303 HEAD", http_redirect_method(303, "HEAD"), "HEAD");
-  t_str("301 POST", http_redirect_method(301, "POST"), "GET");
-  t_str("302 POST", http_redirect_method(302, "POST"), "GET");
-  t_str("301 PUT", http_redirect_method(301, "PUT"), "PUT");
-  t_str("302 DELETE", http_redirect_method(302, "DELETE"), "DELETE");
-  t_str("307 POST", http_redirect_method(307, "POST"), "POST");
-  t_str("308 PUT", http_redirect_method(308, "PUT"), "PUT");
-  t_ok("303 drops body", !http_redirect_keeps_body(303, "POST"));
-  t_ok("302 POST drops body", !http_redirect_keeps_body(302, "POST"));
-  t_ok("301 PUT keeps body", http_redirect_keeps_body(301, "PUT"));
-  t_ok("307 keeps body", http_redirect_keeps_body(307, "POST"));
-  t_ok("308 keeps body", http_redirect_keeps_body(308, "POST"));
+  t_str("303 POST", fetch_redirect_method(303, "POST"), "GET");
+  t_str("303 PUT", fetch_redirect_method(303, "PUT"), "GET");
+  t_str("303 HEAD", fetch_redirect_method(303, "HEAD"), "HEAD");
+  t_str("301 POST", fetch_redirect_method(301, "POST"), "GET");
+  t_str("302 POST", fetch_redirect_method(302, "POST"), "GET");
+  t_str("301 PUT", fetch_redirect_method(301, "PUT"), "PUT");
+  t_str("302 DELETE", fetch_redirect_method(302, "DELETE"), "DELETE");
+  t_str("307 POST", fetch_redirect_method(307, "POST"), "POST");
+  t_str("308 PUT", fetch_redirect_method(308, "PUT"), "PUT");
+  t_ok("303 drops body", !fetch_redirect_keeps_body(303, "POST"));
+  t_ok("302 POST drops body", !fetch_redirect_keeps_body(302, "POST"));
+  t_ok("301 PUT keeps body", fetch_redirect_keeps_body(301, "PUT"));
+  t_ok("307 keeps body", fetch_redirect_keeps_body(307, "POST"));
+  t_ok("308 keeps body", fetch_redirect_keeps_body(308, "POST"));
 
   var h: HttpHeader[5];
   h[0].name = "Authorization"; h[0].value = "Bearer x";
@@ -43,21 +43,21 @@ fn main() -> int32 {
   h[3].name = "Content-Type"; h[3].value = "text/plain";
   h[4].name = "Accept"; h[4].value = "*/*";
   var o: HttpHeader[5];
-  t_eq("keep all", (int64)http_redirect_headers(&h[0], 5, &o[0], false, false), 5);
-  t_eq("drop auth", (int64)http_redirect_headers(&h[0], 5, &o[0], true, false), 3);
+  t_eq("keep all", (int64)fetch_redirect_headers(&h[0], 5, &o[0], false, false), 5);
+  t_eq("drop auth", (int64)fetch_redirect_headers(&h[0], 5, &o[0], true, false), 3);
   t_ok("drop auth names", o[0].name == "X-Keep" && o[1].name == "Content-Type" && o[2].name == "Accept");
-  t_eq("drop body headers", (int64)http_redirect_headers(&h[0], 5, &o[0], false, true), 4);
-  t_eq("drop both", (int64)http_redirect_headers(&h[0], 5, &o[0], true, true), 2);
+  t_eq("drop body headers", (int64)fetch_redirect_headers(&h[0], 5, &o[0], false, true), 4);
+  t_eq("drop both", (int64)fetch_redirect_headers(&h[0], 5, &o[0], true, true), 2);
 
   var a: HttpUrl;
   var b: HttpUrl;
   http_url_parse("http://Example.com/x", &a);
   http_url_parse("http://example.COM/y?z", &b);
-  t_ok("same host", http_url_same_host(&a, &b));
+  t_ok("same host", fetch_url_same_host(&a, &b));
   http_url_parse("http://example.com:8080/x", &b);
-  t_ok("other port", !http_url_same_host(&a, &b));
+  t_ok("other port", !fetch_url_same_host(&a, &b));
   http_url_parse("http://www.example.com/x", &b);
-  t_ok("other host", !http_url_same_host(&a, &b));
+  t_ok("other host", !fetch_url_same_host(&a, &b));
 
   var base: string = "http://h.test/a/b/c.html?x=1#frag";
   t_str("absolute", resolve(base, "https://other.test/p?q=1#f"), "https://other.test/p?q=1");

@@ -1,33 +1,33 @@
 # The cookie jar
 
 ```mettle
-import "http/cookie";
+import "fetch/cookie";
 ```
 
 ```mettle
-var jar: HttpCookieJar;
-http_cookie_jar_init(&jar);
+var jar: FetchCookieJar;
+fetch_cookie_jar_init(&jar);
 client.jar = &jar;
 // ...
-http_cookie_jar_free(&jar);
+fetch_cookie_jar_free(&jar);
 ```
 
-Attach the jar to an `HttpClient` and it does the rest: it stores the `Set-Cookie` lines of every response, redirects included, and sends a `Cookie` header with each request. You can also use it by hand.
+Attach the jar to an `FetchClient` and it does the rest: it stores the `Set-Cookie` lines of every response, redirects included, and sends a `Cookie` header with each request. You can also use it by hand.
 
 ## Calls
 
 | Call | Does |
 |---|---|
-| `http_cookie_jar_init(j)`, `_free(j)`, `_clear(j)` | Set up, release, empty. |
-| `http_cookie_jar_set(j, line, host, path, secure)` | Parse one `Set-Cookie` line from a response to a request for `host` and `path` (`secure`: it came over TLS) and store it. Returns `HTTP_COOKIE_OK`, `HTTP_COOKIE_DELETED` or an `HTTP_COOKIE_ERR_*` code. |
-| `http_cookie_jar_header(j, arena, host, path, secure)` | The `Cookie` header value for a request, or `""`. |
-| `http_cookie_parse(arena, line, host, path, secure, now, &cookie)` | Parse a line without storing it. |
-| `http_cookie_jar_add(j, &cookie)` | Store a copy of a cookie. |
-| `http_cookie_jar_find(j, name, domain, path)` | The stored cookie, or 0. |
-| `http_cookie_jar_count(j)`, `_get(j, i)` | Walk the stored cookies. |
-| `http_cookie_jar_expire(j)` | Drop expired cookies. |
-| `http_cookie_matches(c, host, path, secure)` | Whether a cookie goes to a request. |
-| `http_cookie_parse_date(s, &unix)` | The cookie date format of RFC 6265. |
+| `fetch_cookie_jar_init(j)`, `_free(j)`, `_clear(j)` | Set up, release, empty. |
+| `fetch_cookie_jar_set(j, line, host, path, secure)` | Parse one `Set-Cookie` line from a response to a request for `host` and `path` (`secure`: it came over TLS) and store it. Returns `FETCH_COOKIE_OK`, `FETCH_COOKIE_DELETED` or an `HTTP_COOKIE_ERR_*` code. |
+| `fetch_cookie_jar_header(j, arena, host, path, secure)` | The `Cookie` header value for a request, or `""`. |
+| `fetch_cookie_parse(arena, line, host, path, secure, now, &cookie)` | Parse a line without storing it. |
+| `fetch_cookie_jar_add(j, &cookie)` | Store a copy of a cookie. |
+| `fetch_cookie_jar_find(j, name, domain, path)` | The stored cookie, or 0. |
+| `fetch_cookie_jar_count(j)`, `_get(j, i)` | Walk the stored cookies. |
+| `fetch_cookie_jar_expire(j)` | Drop expired cookies. |
+| `fetch_cookie_matches(c, host, path, secure)` | Whether a cookie goes to a request. |
+| `fetch_cookie_parse_date(s, &unix)` | The cookie date format of RFC 6265. |
 
 Fields of the jar: `now` (unix seconds; 0 reads the clock, a test can set it), `max_total` (3000) and `max_per_domain` (50). When a limit is reached, expired cookies go first, then the oldest.
 
