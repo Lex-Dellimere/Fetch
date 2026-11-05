@@ -39,7 +39,7 @@ export fn fetch_tls_free(t: FetchTlsConfig*) {
 fn ht_prepare(t: FetchTlsConfig*) {
   if (t->ready != 0) { return; }
   mtls_config_init(&t->cfg);
-  mtls_config_add_alpn(&t->cfg, "fetch/1.1");
+  mtls_config_add_alpn(&t->cfg, "http/1.1");
   if (t->insecure != 0) { t->cfg.verify_mode = MTLS_VERIFY_NONE; }
   if (t->roots != 0) {
     t->cfg.roots = t->roots;

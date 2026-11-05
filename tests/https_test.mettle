@@ -64,7 +64,7 @@ fn main() -> int32 {
   var scfg: MtlsConfig;
   mtls_config_init(&scfg);
   t_eq("server cert", (int64)mtls_config_set_cert_pem(&scfg, chain.chars, (int64)chain.length, key.chars, (int64)key.length), 0);
-  mtls_config_add_alpn(&scfg, "fetch/1.1");
+  mtls_config_add_alpn(&scfg, "http/1.1");
   srv_start_tls(&page, &scfg);
 
   var roots: MtlsRoots;
@@ -77,7 +77,7 @@ fn main() -> int32 {
 
   var r: FetchReply* = reply_of(fetch_client_get(&c, a, url(a, "127.0.0.1", "/hello")));
   t_ok("get", r != (FetchReply*)0 && r->status == 200 && r->body == "hello over tls" && r->reused == 0);
-  t_str("ALPN", srv_alpn(0), "fetch/1.1");
+  t_str("ALPN", srv_alpn(0), "http/1.1");
   r = reply_of(fetch_client_get(&c, a, url(a, "127.0.0.1", "/hello")));
   t_ok("reused", r != (FetchReply*)0 && r->body == "hello over tls" && r->reused == 1);
   t_eq("one TLS connection", (int64)srv_accepts(), 1);
