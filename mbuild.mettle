@@ -5,7 +5,7 @@
 import "mbuild/api";
 
 fn project() {
-  mb_package("fetch", "0.1.0");
+  mb_package("fetch", "0.1.2");
   mb_meta("description", "a high-level HTTP client for Mettle on top of std/http: connection pooling, redirects, cookies, gzip and deflate");
   mb_meta("license", "Apache-2.0");
   mb_meta("repository", "https://github.com/Lex-Dellimere/Fetch");
