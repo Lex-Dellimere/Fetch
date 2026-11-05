@@ -16,27 +16,7 @@ import "http/pool";
 import "http/cookie";
 import "http/redirect";
 import "http/tls";
-
-export const HTTP_CLIENT_ERR_REDIRECTS = -100;    // more redirects than max_redirects
-export const HTTP_CLIENT_ERR_DOWNGRADE = -101;    // a redirect from https to http
-export const HTTP_CLIENT_ERR_LOCATION = -102;     // a Location that is not an http or https URL
-export const HTTP_CLIENT_ERR_ENCODING = -103;     // gzip or deflate data that does not decode
-export const HTTP_CLIENT_ERR_SCHEME = -104;       // the URL is not http or https
-export const HTTP_CLIENT_ERR_HANDSHAKE = -105;    // the TLS handshake failed
-export const HTTP_CLIENT_ERR_CERT = -106;         // the server's certificate was refused
-
-export fn http_client_error_text(code: int64) -> string {
-  switch (code) {
-    case -100: { return "too many redirects"; }
-    case -101: { return "redirect from https to http refused"; }
-    case -102: { return "bad redirect location"; }
-    case -103: { return "bad gzip or deflate data"; }
-    case -104: { return "not an http URL"; }
-    case -105: { return "TLS handshake failed"; }
-    case -106: { return "certificate refused"; }
-    default: { return http_error_text(code); }
-  }
-}
+import "http/error";
 
 // What a request returns. Everything in it lives in the arena.
 export struct HttpReply {
@@ -525,7 +505,14 @@ fn hc_hop(c: HttpClient*, arena: Arena*, verb: string, u: HttpUrl*, headers: Htt
     var res: HttpResponse;
     var reusable: bool = false;
     var s: HttpStream* = &conn->stream;
-    if (deadline >= 0 && s->fd >= 0) { sock_set_timeout(s->fd, -1, hc_left(deadline) + 1); }
+    if (conn->probe_fd >= 0) {
+      var left: int64 = hc_left(deadline);
+      if (left < 0) {
+        sock_set_timeout(conn->probe_fd, 0, 0);
+      } else {
+        sock_set_timeout(conn->probe_fd, left + 1, left + 1);
+      }
+    }
     var code: int64 = hc_send(s, head.chars, (int64)head.length);
     if (code == 0 && body.length > 0) { code = hc_send(s, body.chars, (int64)body.length); }
     if (code == 0) { code = hc_read_response(c, s, &io, is_head, deadline, &res, &reusable); }

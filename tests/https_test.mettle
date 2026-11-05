@@ -1,0 +1,156 @@
+// https against a local mtls server: certificate checks, SNI, ALPN,
+// connection reuse, large bodies, cookies and redirects.
+import "http/http";
+import "mtls/mtls";
+import "server";
+import "tutil";
+import "std/http";
+import "std/arena";
+import "std/core";
+import "std/conv";
+import "std/thread";
+
+fn page(r: SrvReq*) -> int32 {
+  var t: string = r->target;
+  if (t == "/hello") {
+    srv_reply(r, 200, "", "hello over tls");
+  } else if (t == "/echo") {
+    srv_reply(r, 200, "", r->body);
+  } else if (t == "/big") {
+    var body: string = "0123456789abcdef";
+    for i in 0..14 { body = body + body; }
+    srv_reply(r, 200, "", body);
+  } else if (t == "/cookie") {
+    srv_reply(r, 200, "Set-Cookie: s=1; Secure\r\nSet-Cookie: p=2\r\n", "set");
+  } else if (t == "/cookies") {
+    srv_reply(r, 200, "", srv_header(r, "Cookie"));
+  } else if (t == "/go") {
+    srv_reply(r, 302, "Location: /hello\r\n", "moved");
+  } else if (t == "/down") {
+    srv_reply(r, 302, "Location: http://127.0.0.1:1/plain\r\n", "moved");
+  } else if (t == "/slow") {
+    thread_sleep_ms((uint32)600);
+    srv_reply(r, 200, "", "late");
+  } else if (t == "/chunked") {
+    srv_send_raw(r, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+  } else {
+    srv_reply(r, 404, "", "no");
+  }
+  return 0;
+}
+
+fn reply_of(r: Result<HttpReply*, string>) -> HttpReply* {
+  match (r) {
+    case Ok(x): { return x; }
+    case Err(e): { return (HttpReply*)0; }
+  }
+}
+
+fn err_of(r: Result<HttpReply*, string>) -> string {
+  match (r) {
+    case Ok(x): { return ""; }
+    case Err(e): { return e; }
+  }
+}
+
+fn url(a: Arena*, host: string, path: string) -> string {
+  return "https://{host}:{srv_port()}{path}";
+}
+
+fn main() -> int32 {
+  var ca: string = import_str "data/tls/ca.pem";
+  var chain: string = import_str "data/tls/server.pem";
+  var key: string = import_str "data/tls/server.key";
+  var scfg: MtlsConfig;
+  mtls_config_init(&scfg);
+  t_eq("server cert", (int64)mtls_config_set_cert_pem(&scfg, chain.chars, (int64)chain.length, key.chars, (int64)key.length), 0);
+  mtls_config_add_alpn(&scfg, "http/1.1");
+  srv_start_tls(&page, &scfg);
+
+  var roots: MtlsRoots;
+  mtls_roots_init(&roots);
+  t_eq("test CA", (int64)mtls_roots_add_pem(&roots, ca.chars, (int64)ca.length), 1);
+  var a: Arena* = arena_init((int64)0);
+  var c: HttpClient;
+  http_client_init(&c);
+  c.tls.roots = &roots;
+
+  var r: HttpReply* = reply_of(http_client_get(&c, a, url(a, "127.0.0.1", "/hello")));
+  t_ok("get", r != (HttpReply*)0 && r->status == 200 && r->body == "hello over tls" && r->reused == 0);
+  t_str("ALPN", srv_alpn(0), "http/1.1");
+  r = reply_of(http_client_get(&c, a, url(a, "127.0.0.1", "/hello")));
+  t_ok("reused", r != (HttpReply*)0 && r->body == "hello over tls" && r->reused == 1);
+  t_eq("one TLS connection", (int64)srv_accepts(), 1);
+  t_str("Host header has the port", srv_log_header(0, "Host"), "127.0.0.1:{srv_port()}");
+
+  // the host name is the SNI, and a different host is a different connection
+  r = reply_of(http_client_get(&c, a, url(a, "localhost", "/hello")));
+  t_ok("localhost", r != (HttpReply*)0 && r->status == 200 && r->reused == 0);
+  t_eq("a second connection", (int64)srv_accepts(), 2);
+  t_str("SNI", srv_sni(1), "localhost");
+
+  // bodies of many records, both ways
+  var big: string = "";
+  var chunk: string = "0123456789abcdef";
+  for i in 0..13 { chunk = chunk + chunk; }
+  big = chunk;
+  r = reply_of(http_client_request(&c, a, "POST", url(a, "localhost", "/echo"), (HttpHeader*)0, 0, big));
+  t_ok("large POST echoed", r != (HttpReply*)0 && r->body == big && r->reused == 1);
+  r = reply_of(http_client_get(&c, a, url(a, "localhost", "/big")));
+  t_ok("large GET", r != (HttpReply*)0 && r->body.length == 262144 && r->reused == 1);
+  r = reply_of(http_client_get(&c, a, url(a, "localhost", "/chunked")));
+  t_ok("chunked", r != (HttpReply*)0 && r->body == "hello world");
+  t_eq("still two connections", (int64)srv_accepts(), 2);
+
+  // redirects stay on TLS, and a downgrade is refused
+  r = reply_of(http_client_get(&c, a, url(a, "localhost", "/go")));
+  t_ok("redirect", r != (HttpReply*)0 && r->body == "hello over tls" && r->redirects == 1 && r->reused == 1);
+  t_str("downgrade", err_of(http_client_get(&c, a, url(a, "localhost", "/down"))), "redirect from https to http refused");
+  c.allow_downgrade = 1;
+  t_ok("downgrade allowed, then the connection fails", str_starts_with(err_of(http_client_get(&c, a, url(a, "localhost", "/down"))), "connect failed") == 1);
+  c.allow_downgrade = 0;
+
+  // Secure cookies are kept from https and sent only to https
+  var jar: HttpCookieJar;
+  http_cookie_jar_init(&jar);
+  c.jar = &jar;
+  http_client_get(&c, a, url(a, "localhost", "/cookie"));
+  t_eq("both stored", (int64)http_cookie_jar_count(&jar), 2);
+  t_str("both sent", body_text(http_client_get(&c, a, url(a, "localhost", "/cookies"))), "s=1; p=2");
+  var hc: HttpCookie* = http_cookie_jar_find(&jar, "s", "localhost", "/");
+  t_ok("Secure flag", hc != (HttpCookie*)0 && hc->secure == 1);
+  c.jar = (HttpCookieJar*)0;
+  http_cookie_jar_free(&jar);
+
+  // timeout on a TLS connection
+  c.timeout_ms = 150;
+  var t0: int64 = net_now_ms();
+  t_str("timeout", err_of(http_client_get(&c, a, url(a, "localhost", "/slow"))), "timed out");
+  t_ok("timeout was quick", net_now_ms() - t0 < 500);
+  c.timeout_ms = 30000;
+  t_str("a fresh connection works after", body_text(http_client_get(&c, a, url(a, "localhost", "/hello"))), "hello over tls");
+  http_client_free(&c);
+
+  // without the test CA the certificate is refused
+  var d: HttpClient;
+  http_client_init(&d);
+  var e: string = err_of(http_client_get(&d, a, url(a, "127.0.0.1", "/hello")));
+  t_ok("untrusted: " + e, str_starts_with(e, "certificate refused: ") == 1);
+  http_client_free(&d);
+
+  // unless checks are off
+  http_client_init(&d);
+  d.tls.insecure = 1;
+  t_str("insecure", body_text(http_client_get(&d, a, url(a, "127.0.0.1", "/hello"))), "hello over tls");
+  http_client_free(&d);
+
+  mtls_roots_free(&roots);
+  return t_done("https");
+}
+
+fn body_text(r: Result<HttpReply*, string>) -> string {
+  match (r) {
+    case Ok(x): { return "" + x->body; }
+    case Err(e): { return "ERR:" + e; }
+  }
+}

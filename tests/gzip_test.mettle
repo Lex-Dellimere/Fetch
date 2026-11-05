@@ -58,14 +58,14 @@ fn page(r: SrvReq*) -> int32 {
     srv_reply(r, 204, "Content-Encoding: gzip\r\n", "");
   } else if (t == "/chunked") {
     var z: string = view(&g_gzip);
-    srv_send_raw(r->fd, "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n");
+    srv_send_raw(r, "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n");
     var half: int64 = (int64)z.length / 2;
-    srv_send_raw(r->fd, hex_line(half));
-    srv_send_raw(r->fd, str_view(z, 0, half));
-    srv_send_raw(r->fd, "\r\n");
-    srv_send_raw(r->fd, hex_line((int64)z.length - half));
-    srv_send_raw(r->fd, str_view(z, half, (int64)z.length - half));
-    srv_send_raw(r->fd, "\r\n0\r\n\r\n");
+    srv_send_raw(r, hex_line(half));
+    srv_send_raw(r, str_view(z, 0, half));
+    srv_send_raw(r, "\r\n");
+    srv_send_raw(r, hex_line((int64)z.length - half));
+    srv_send_raw(r, str_view(z, half, (int64)z.length - half));
+    srv_send_raw(r, "\r\n0\r\n\r\n");
   } else {
     srv_reply(r, 404, "", "no");
   }

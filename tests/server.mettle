@@ -10,6 +10,7 @@ import "std/mem";
 import "std/core";
 import "std/arena";
 import "std/strbuf";
+import "mtls/mtls";
 
 export struct SrvReq {
   verb: string;
@@ -21,6 +22,7 @@ export struct SrvReq {
   req: HttpRequest*;
 }
 
+const SRV_BUF = 1048576;
 const SRV_MAX_CONN = 64;
 const SRV_MAX_LOG = 128;
 const SRV_LOG_ENTRY = 2048;
@@ -35,9 +37,20 @@ var g_srv_log: uint8[262144];
 var g_srv_log_len: int32[128];
 var g_srv_log_conn: int32[128];
 var g_srv_log_n: int32 = 0;
+var g_srv_tls: MtlsConfig*;
+var g_srv_ms: int64[64];          // the MtlsStream of a TLS connection, or 0
+var g_srv_sni: uint8[4096];
+var g_srv_sni_len: int32[64];
+var g_srv_alpn: uint8[4096];
+var g_srv_alpn_len: int32[64];
 
-export fn srv_send_raw(fd: int64, s: string) {
-  sock_send_all(fd, s.chars, (int64)s.length);
+export fn srv_send_raw(r: SrvReq*, s: string) {
+  var ms: int64 = g_srv_ms[r->conn];
+  if (ms != 0) {
+    mtls_stream_write((MtlsStream*)ms, s.chars, (int64)s.length);
+  } else {
+    sock_send_all(r->fd, s.chars, (int64)s.length);
+  }
 }
 
 // Sends status, the extra header lines (each ending in CRLF), and a body with
@@ -55,7 +68,7 @@ export fn srv_reply(r: SrvReq*, status: int32, extra: string, body: string) {
   strbuf_append_string(sb, extra);
   strbuf_append_string(sb, "\r\n");
   strbuf_append_string(sb, body);
-  srv_send_raw(r->fd, strbuf_finish_string(sb));
+  srv_send_raw(r, strbuf_finish_string(sb));
   arena_free(a);
 }
 
@@ -80,16 +93,65 @@ fn srv_record(r: SrvReq*, head: uint8*, head_len: int64) {
   sync_mutex_unlock(&g_srv_lock);
 }
 
+fn srv_read(idx: int32, fd: int64, p: uint8*, n: int64) -> int64 {
+  var ms: int64 = g_srv_ms[idx];
+  if (ms != 0) {
+    var r: int64 = mtls_stream_read((MtlsStream*)ms, p, n);
+    if (r < 0) { return -1; }
+    return r;
+  }
+  return sock_recv(fd, p, n);
+}
+
+// Reads until a whole head is in buf. Returns the bytes held, or -1.
+fn srv_read_head(idx: int32, fd: int64, buf: uint8*, cap: int64, have: int64, head_end: int64*) -> int64 {
+  var n: int64 = have;
+  while (true) {
+    var e: int64 = http_find_head_end(buf, n);
+    if (e < 0) { return -1; }
+    if (e > 0) {
+      *head_end = e;
+      return n;
+    }
+    if (n >= cap) { return -1; }
+    var r: int64 = srv_read(idx, fd, buf + n, cap - n);
+    if (r <= 0) { return -1; }
+    n = n + r;
+  }
+  return -1;
+}
+
+fn srv_copy_text(dst: uint8*, cap: int64, s: string) -> int32 {
+  var n: int64 = (int64)s.length;
+  if (n > cap) { n = cap; }
+  memcpy(dst, s.chars, n);
+  return (int32)n;
+}
+
 fn srv_conn_main(arg: cstring) -> uint32 {
   var idx: int32 = (int32)(int64)arg;
   var fd: int64 = g_srv_fds[idx];
-  var buf: uint8[16384];
+  sock_set_timeout(fd, 5000, 5000);
+  if (g_srv_tls != 0) {
+    var ms: MtlsStream* = (MtlsStream*)malloc((int64)sizeof(MtlsStream));
+    memset(ms, 0, (int64)sizeof(MtlsStream));
+    if (mtls_stream_server(ms, fd, g_srv_tls) != MTLS_OK) {
+      mtls_stream_close(ms);
+      free(ms);
+      sock_close(fd);
+      return (uint32)0;
+    }
+    g_srv_sni_len[idx] = srv_copy_text(&g_srv_sni[(int64)idx * 64], 64, mtls_conn_server_name(ms->c));
+    g_srv_alpn_len[idx] = srv_copy_text(&g_srv_alpn[(int64)idx * 64], 64, mtls_conn_alpn(ms->c));
+    g_srv_ms[idx] = (int64)ms;
+  }
+  var buf: uint8* = (uint8*)malloc((int64)SRV_BUF);
   var have: int64 = 0;
   var nth: int32 = 0;
   var go: bool = true;
   while (go) {
     var head_end: int64 = 0;
-    have = http_read_head(fd, &buf[0], 16384, have, 5000, &head_end);
+    have = srv_read_head(idx, fd, &buf[0], SRV_BUF, have, &head_end);
     if (have < 0) { break; }
     var v: string;
     v.chars = &buf[0];
@@ -100,7 +162,7 @@ fn srv_conn_main(arg: cstring) -> uint32 {
     var total: int64 = head_end;
     if (kind.kind == HTTP_BODY_LENGTH) { total = head_end + kind.length; }
     while (have < total) {
-      var got: int64 = sock_recv(fd, &buf[have], 16384 - have);
+      var got: int64 = srv_read(idx, fd, &buf[have], SRV_BUF - have);
       if (got <= 0) {
         go = false;
         break;
@@ -124,6 +186,11 @@ fn srv_conn_main(arg: cstring) -> uint32 {
     nth = nth + 1;
     if (rc != 0) { go = false; }
   }
+  free(buf);
+  if (g_srv_ms[idx] != 0) {
+    mtls_stream_close((MtlsStream*)g_srv_ms[idx]);
+    free((MtlsStream*)g_srv_ms[idx]);
+  }
   sock_close(fd);
   return (uint32)0;
 }
@@ -140,6 +207,28 @@ fn srv_accept_main(arg: cstring) -> uint32 {
     CreateThread((cstring)0, (uint64)0, &srv_conn_main, (cstring)(int64)idx, (uint32)0, &tid);
   }
   return (uint32)0;
+}
+
+// The server name (SNI) the client of connection idx sent, or "".
+export fn srv_sni(idx: int32) -> string {
+  var s: string;
+  s.chars = &g_srv_sni[(int64)idx * 64];
+  s.length = (uint64)g_srv_sni_len[idx];
+  return s;
+}
+
+// The protocol that connection idx agreed on, or "".
+export fn srv_alpn(idx: int32) -> string {
+  var s: string;
+  s.chars = &g_srv_alpn[(int64)idx * 64];
+  s.length = (uint64)g_srv_alpn_len[idx];
+  return s;
+}
+
+// Like srv_start, but every connection runs TLS with cfg first.
+export fn srv_start_tls(handler: fn(SrvReq*) -> int32, cfg: MtlsConfig*) -> int32 {
+  g_srv_tls = cfg;
+  return srv_start(handler);
 }
 
 // Starts the server on a free loopback port and returns the port.

@@ -14,5 +14,6 @@ fn project() {
 }
 
 fn deps() {
+  mb_dep_path("mtls", "../mtls");
   mb_dep_path("press", "../press");
 }

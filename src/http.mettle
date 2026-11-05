@@ -3,5 +3,6 @@ import "http/stream";
 import "http/pool";
 import "http/cookie";
 import "http/redirect";
+import "http/error";
 import "http/tls";
 import "http/client";
