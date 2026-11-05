@@ -1,0 +1,209 @@
+// The client against a loopback server: connection reuse and its limits,
+// retry after a closed connection, framing, limits and errors.
+import "http/http";
+import "server";
+import "tutil";
+import "std/http";
+import "std/arena";
+import "std/thread";
+import "std/core";
+import "std/conv";
+
+fn page(r: SrvReq*) -> int32 {
+  var t: string = r->target;
+  if (t == "/hello" || str_starts_with(t, "/hello?") == 1) {
+    srv_reply(r, 200, "", "hello");
+  } else if (t == "/bye") {
+    srv_reply(r, 200, "Connection: close\r\n", "bye");
+    return 1;
+  } else if (t == "/once") {
+    srv_reply(r, 200, "", "once");
+    return 1;
+  } else if (t == "/flaky") {
+    // a kept connection that the server has just closed: no answer at all
+    if (r->nth > 0) { return 1; }
+    srv_reply(r, 200, "", "flaky ok");
+  } else if (t == "/slow") {
+    thread_sleep_ms((uint32)600);
+    srv_reply(r, 200, "", "late");
+  } else if (t == "/chunked") {
+    srv_send_raw(r->fd, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
+  } else if (t == "/until-close") {
+    srv_send_raw(r->fd, "HTTP/1.1 200 OK\r\n\r\nstreamed");
+    return 1;
+  } else if (t == "/big") {
+    var body: string = "0123456789";
+    for i in 0..9 { body = body + body; }
+    srv_reply(r, 200, "", body);
+  } else if (t == "/head") {
+    srv_send_raw(r->fd, "HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n");
+  } else if (t == "/echo") {
+    srv_reply(r, 200, "", r->body);
+  } else if (t == "/interim") {
+    srv_send_raw(r->fd, "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+  } else {
+    srv_reply(r, 404, "", "no");
+  }
+  return 0;
+}
+
+fn body_of(r: Result<HttpReply*, string>) -> string {
+  match (r) {
+    case Ok(x): { return x->body; }
+    case Err(e): { return "ERR:" + e; }
+  }
+}
+
+fn reply_of(r: Result<HttpReply*, string>) -> HttpReply* {
+  match (r) {
+    case Ok(x): { return x; }
+    case Err(e): { return (HttpReply*)0; }
+  }
+}
+
+fn err_of(r: Result<HttpReply*, string>) -> string {
+  match (r) {
+    case Ok(x): { return ""; }
+    case Err(e): { return e; }
+  }
+}
+
+fn main() -> int32 {
+  var port: int32 = srv_start(&page);
+  t_ok("server started", port > 0);
+  var a: Arena* = arena_init((int64)0);
+  var c: HttpClient;
+  http_client_init(&c);
+
+  // two requests, one connection
+  var r: HttpReply* = reply_of(http_client_get(&c, a, srv_url(a, "/hello")));
+  t_ok("first", r != (HttpReply*)0 && r->status == 200 && r->body == "hello" && r->reused == 0);
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/hello?x=1")));
+  t_ok("second", r != (HttpReply*)0 && r->body == "hello" && r->reused == 1);
+  t_eq("one accept for two requests", (int64)srv_accepts(), 1);
+  t_eq("dials", c.dials, 1);
+  t_eq("reuses", c.reuses, 1);
+  t_eq("both on connection 0", (int64)(srv_conn_of(0) + srv_conn_of(1)), 0);
+  t_eq("idle after", (int64)http_pool_count(&c.pool), 1);
+  t_str("target kept", srv_log_target(1), "/hello?x=1");
+  t_str("host header", srv_log_header(0, "Host"), "127.0.0.1:{port}");
+  t_str("accept-encoding sent", srv_log_header(0, "Accept-Encoding"), "gzip, deflate");
+  t_str("no connection header", srv_log_header(0, "Connection"), "");
+
+  // framing the pool can reuse
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/chunked")));
+  t_ok("chunked", r != (HttpReply*)0 && r->body == "hello world" && r->reused == 1);
+  r = reply_of(http_client_request(&c, a, "HEAD", srv_url(a, "/head"), (HttpHeader*)0, 0, ""));
+  t_ok("head has no body", r != (HttpReply*)0 && r->status == 200 && r->body.length == 0 && r->reused == 1);
+  t_eq("still one accept", (int64)srv_accepts(), 1);
+
+  // a reply that says Connection: close ends the connection
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/bye")));
+  t_ok("bye", r != (HttpReply*)0 && r->body == "bye" && r->reused == 1);
+  t_eq("not kept", (int64)http_pool_count(&c.pool), 0);
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/hello")));
+  t_ok("after bye", r != (HttpReply*)0 && r->reused == 0);
+  t_eq("two accepts", (int64)srv_accepts(), 2);
+
+  // a body that runs until close cannot be reused
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/until-close")));
+  t_ok("until close", r != (HttpReply*)0 && r->body == "streamed");
+  t_eq("until close not kept", (int64)http_pool_count(&c.pool), 0);
+
+  // the server closed a kept connection some time ago: dropped before use
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/once")));
+  t_ok("once", r != (HttpReply*)0 && r->body == "once");
+  t_eq("once kept", (int64)http_pool_count(&c.pool), 1);
+  thread_sleep_ms((uint32)100);
+  var retries0: int64 = c.retries;
+  var accepts0: int32 = srv_accepts();
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/hello")));
+  t_ok("after once", r != (HttpReply*)0 && r->body == "hello" && r->reused == 0);
+  t_eq("a new connection", (int64)(srv_accepts() - accepts0), 1);
+  t_eq("no retry needed", c.retries - retries0, 0);
+
+  // the server closes a kept connection just as the request arrives: retry
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/hello")));
+  accepts0 = srv_accepts();
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/flaky")));
+  t_ok("flaky retried", r != (HttpReply*)0 && r->body == "flaky ok" && r->reused == 0);
+  t_eq("one retry", c.retries - retries0, 1);
+  t_eq("retry opened one connection", (int64)(srv_accepts() - accepts0), 1);
+
+  // a POST is never sent again
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/hello")));
+  retries0 = c.retries;
+  var e: string = err_of(http_client_request(&c, a, "POST", srv_url(a, "/flaky"), (HttpHeader*)0, 0, "data"));
+  t_str("post not retried", e, "connection closed early");
+  t_eq("no retry for POST", c.retries - retries0, 0);
+
+  // idle timeout and caps
+  var d: HttpClient;
+  http_client_init(&d);
+  d.pool.idle_timeout_ms = 80;
+  accepts0 = srv_accepts();
+  http_client_get(&d, a, srv_url(a, "/hello"));
+  t_eq("idle", (int64)http_pool_count(&d.pool), 1);
+  thread_sleep_ms((uint32)200);
+  http_client_prune(&d);
+  t_eq("pruned after the timeout", (int64)http_pool_count(&d.pool), 0);
+  r = reply_of(http_client_get(&d, a, srv_url(a, "/hello")));
+  t_ok("new connection after the timeout", r != (HttpReply*)0 && r->reused == 0);
+  t_eq("two connections", (int64)(srv_accepts() - accepts0), 2);
+  http_client_free(&d);
+
+  // keep_alive off: one connection per request, and the header says so
+  http_client_init(&d);
+  d.keep_alive = 0;
+  accepts0 = srv_accepts();
+  var n0: int32 = srv_requests();
+  http_client_get(&d, a, srv_url(a, "/bye"));
+  http_client_get(&d, a, srv_url(a, "/hello"));
+  t_eq("no reuse when off", (int64)(srv_accepts() - accepts0), 2);
+  t_str("connection close sent", srv_log_header(n0, "Connection"), "close");
+  t_eq("nothing idle", (int64)http_pool_count(&d.pool), 0);
+  http_client_free(&d);
+
+  // request bodies, headers, interim replies, errors
+  var hh: HttpHeader[2];
+  hh[0].name = "X-Custom";
+  hh[0].value = "yes";
+  hh[1].name = "Accept-Encoding";
+  hh[1].value = "identity";
+  n0 = srv_requests();
+  r = reply_of(http_client_request(&c, a, "POST", srv_url(a, "/echo"), &hh[0], 2, "ping body"));
+  t_ok("post echo", r != (HttpReply*)0 && r->body == "ping body");
+  t_str("content-length", srv_log_header(n0, "Content-Length"), "9");
+  t_str("custom header", srv_log_header(n0, "X-Custom"), "yes");
+  t_str("own accept-encoding wins", srv_log_header(n0, "Accept-Encoding"), "identity");
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/interim")));
+  t_ok("interim skipped", r != (HttpReply*)0 && r->status == 200 && r->body == "ok");
+  r = reply_of(http_client_get(&c, a, srv_url(a, "/nothing")));
+  t_ok("404", r != (HttpReply*)0 && r->status == 404 && r->body == "no");
+
+  hh[0].name = "Connection";
+  hh[0].value = "close";
+  t_ok("reserved header", err_of(http_client_request(&c, a, "GET", srv_url(a, "/hello"), &hh[0], 1, "")) != "");
+  hh[0].name = "X";
+  hh[0].value = "a\r\nInjected: 1";
+  t_str("header injection", err_of(http_client_request(&c, a, "GET", srv_url(a, "/hello"), &hh[0], 1, "")), "bad header value");
+  t_str("bad method", err_of(http_client_request(&c, a, "GE T", srv_url(a, "/hello"), (HttpHeader*)0, 0, "")), "bad method");
+  t_str("bad url", err_of(http_client_get(&c, a, "http://127.0.0.1/a b")), "bad URL");
+  t_str("scheme", err_of(http_client_get(&c, a, "ws://127.0.0.1/")), "not an http URL");
+
+  // limits
+  http_client_init(&d);
+  d.max_body = 1000;
+  t_str("body over the limit", err_of(http_client_get(&d, a, srv_url(a, "/big"))), "body too large");
+  d.max_body = 100000;
+  r = reply_of(http_client_get(&d, a, srv_url(a, "/big")));
+  t_ok("body under the limit", r != (HttpReply*)0 && r->body.length == 5120);
+  d.timeout_ms = 150;
+  var t0: int64 = net_now_ms();
+  t_str("timeout", err_of(http_client_get(&d, a, srv_url(a, "/slow"))), "timed out");
+  t_ok("timeout was quick", net_now_ms() - t0 < 500);
+  http_client_free(&d);
+
+  http_client_free(&c);
+  return t_done("client");
+}

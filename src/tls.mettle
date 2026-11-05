@@ -1,0 +1,21 @@
+// https: not available yet.
+
+import "std/arena";
+import "std/http";
+import "http/stream";
+import "http/pool";
+
+export struct HttpTlsConfig {
+  unused: int32;
+}
+
+export fn http_tls_init(t: HttpTlsConfig*) {
+  t->unused = 0;
+}
+
+export fn http_tls_free(t: HttpTlsConfig*) {
+}
+
+export fn http_tls_dial(t: HttpTlsConfig*, arena: Arena*, host: string, port: int32, timeout_ms: int64, key: string, out: HttpConn**, detail: string*) -> int64 {
+  return HTTP_ERR_TLS;
+}

@@ -1,0 +1,229 @@
+// A loopback HTTP/1.1 server for the tests. It accepts connections in one
+// thread and answers each connection in its own, so several clients can hold
+// connections at once. The test sets a handler; the server logs every
+// request head and counts the connections it accepts.
+import "std/http";
+import "std/socket";
+import "std/thread";
+import "std/sync";
+import "std/mem";
+import "std/core";
+import "std/arena";
+import "std/strbuf";
+
+export struct SrvReq {
+  verb: string;
+  target: string;
+  body: string;
+  conn: int32;        // which accepted connection, from 0
+  nth: int32;         // which request on that connection, from 0
+  fd: int64;
+  req: HttpRequest*;
+}
+
+const SRV_MAX_CONN = 64;
+const SRV_MAX_LOG = 128;
+const SRV_LOG_ENTRY = 2048;
+
+var g_srv_handler: fn(SrvReq*) -> int32;
+var g_srv_listen: int64 = -1;
+var g_srv_port: int32 = 0;
+var g_srv_accepts: int32 = 0;
+var g_srv_fds: int64[64];
+var g_srv_lock: SyncMutex;
+var g_srv_log: uint8[262144];
+var g_srv_log_len: int32[128];
+var g_srv_log_conn: int32[128];
+var g_srv_log_n: int32 = 0;
+
+export fn srv_send_raw(fd: int64, s: string) {
+  sock_send_all(fd, s.chars, (int64)s.length);
+}
+
+// Sends status, the extra header lines (each ending in CRLF), and a body with
+// its Content-Length.
+export fn srv_reply(r: SrvReq*, status: int32, extra: string, body: string) {
+  var a: Arena* = arena_init((int64)0);
+  var sb: StrBuf* = strbuf_new(a, 256);
+  strbuf_append_string(sb, "HTTP/1.1 ");
+  strbuf_append_int(sb, (int64)status);
+  strbuf_append_string(sb, " ");
+  strbuf_append_string(sb, http_status_text(status));
+  strbuf_append_string(sb, "\r\nContent-Length: ");
+  strbuf_append_uint(sb, body.length);
+  strbuf_append_string(sb, "\r\n");
+  strbuf_append_string(sb, extra);
+  strbuf_append_string(sb, "\r\n");
+  strbuf_append_string(sb, body);
+  srv_send_raw(r->fd, strbuf_finish_string(sb));
+  arena_free(a);
+}
+
+export fn srv_header(r: SrvReq*, name: string) -> string {
+  match (http_header(&r->req->headers[0], r->req->nheaders, name)) {
+    case Some(v): { return v; }
+    case None: { return ""; }
+  }
+}
+
+fn srv_record(r: SrvReq*, head: uint8*, head_len: int64) {
+  sync_mutex_lock(&g_srv_lock);
+  var i: int32 = g_srv_log_n;
+  if (i < SRV_MAX_LOG) {
+    var n: int64 = head_len;
+    if (n > (int64)SRV_LOG_ENTRY) { n = (int64)SRV_LOG_ENTRY; }
+    memcpy(&g_srv_log[(int64)i * (int64)SRV_LOG_ENTRY], head, n);
+    g_srv_log_len[i] = (int32)n;
+    g_srv_log_conn[i] = r->conn;
+    g_srv_log_n = i + 1;
+  }
+  sync_mutex_unlock(&g_srv_lock);
+}
+
+fn srv_conn_main(arg: cstring) -> uint32 {
+  var idx: int32 = (int32)(int64)arg;
+  var fd: int64 = g_srv_fds[idx];
+  var buf: uint8[16384];
+  var have: int64 = 0;
+  var nth: int32 = 0;
+  var go: bool = true;
+  while (go) {
+    var head_end: int64 = 0;
+    have = http_read_head(fd, &buf[0], 16384, have, 5000, &head_end);
+    if (have < 0) { break; }
+    var v: string;
+    v.chars = &buf[0];
+    v.length = (uint64)head_end;
+    var req: HttpRequest;
+    if (http_parse_request(v, &req) != head_end) { break; }
+    var kind: HttpBody = http_request_body_kind(&req);
+    var total: int64 = head_end;
+    if (kind.kind == HTTP_BODY_LENGTH) { total = head_end + kind.length; }
+    while (have < total) {
+      var got: int64 = sock_recv(fd, &buf[have], 16384 - have);
+      if (got <= 0) {
+        go = false;
+        break;
+      }
+      have = have + got;
+    }
+    if (!go) { break; }
+    var r: SrvReq;
+    r.verb = req.verb;
+    r.target = req.target;
+    r.body.chars = &buf[head_end];
+    r.body.length = (uint64)(total - head_end);
+    r.conn = idx;
+    r.nth = nth;
+    r.fd = fd;
+    r.req = &req;
+    srv_record(&r, &buf[0], total);
+    var rc: int32 = g_srv_handler(&r);
+    memmove(&buf[0], &buf[total], have - total);
+    have = have - total;
+    nth = nth + 1;
+    if (rc != 0) { go = false; }
+  }
+  sock_close(fd);
+  return (uint32)0;
+}
+
+fn srv_accept_main(arg: cstring) -> uint32 {
+  while (g_srv_accepts < SRV_MAX_CONN) {
+    var peer: NetAddr;
+    var fd: int64 = sock_accept(g_srv_listen, &peer);
+    if (fd < 0) { break; }
+    var idx: int32 = g_srv_accepts;
+    g_srv_fds[idx] = fd;
+    g_srv_accepts = idx + 1;
+    var tid: uint32 = 0;
+    CreateThread((cstring)0, (uint64)0, &srv_conn_main, (cstring)(int64)idx, (uint32)0, &tid);
+  }
+  return (uint32)0;
+}
+
+// Starts the server on a free loopback port and returns the port.
+export fn srv_start(handler: fn(SrvReq*) -> int32) -> int32 {
+  g_srv_handler = handler;
+  var any: NetAddr = net_addr_loopback(NET_IPV4, 0);
+  match (tcp_listen(&any, 64)) {
+    case Ok(fd): { g_srv_listen = fd; }
+    case Err(e): { return 0; }
+  }
+  var bound: NetAddr;
+  sock_local_addr(g_srv_listen, &bound);
+  g_srv_port = bound.port;
+  var tid: uint32 = 0;
+  CreateThread((cstring)0, (uint64)0, &srv_accept_main, (cstring)0, (uint32)0, &tid);
+  return g_srv_port;
+}
+
+export fn srv_port() -> int32 {
+  return g_srv_port;
+}
+
+// "http://127.0.0.1:PORT" and path.
+export fn srv_url(a: Arena*, path: string) -> string {
+  var sb: StrBuf* = strbuf_new(a, 64);
+  strbuf_append_string(sb, "http://127.0.0.1:");
+  strbuf_append_int(sb, (int64)g_srv_port);
+  strbuf_append_string(sb, path);
+  return strbuf_finish_string(sb);
+}
+
+// Connections accepted so far.
+export fn srv_accepts() -> int32 {
+  return g_srv_accepts;
+}
+
+export fn srv_requests() -> int32 {
+  return g_srv_log_n;
+}
+
+// The head of the i-th request, as received.
+export fn srv_head(i: int32) -> string {
+  var s: string;
+  s.chars = &g_srv_log[(int64)i * (int64)SRV_LOG_ENTRY];
+  s.length = (uint64)g_srv_log_len[i];
+  return s;
+}
+
+// Which connection carried the i-th request.
+export fn srv_conn_of(i: int32) -> int32 {
+  return g_srv_log_conn[i];
+}
+
+// A header of the i-th request, or "".
+export fn srv_log_header(i: int32, name: string) -> string {
+  var req: HttpRequest;
+  var h: string = srv_head(i);
+  var end: int64 = http_find_head_end(h.chars, (int64)h.length);
+  if (end <= 0) { return ""; }
+  h.length = (uint64)end;
+  if (http_parse_request(h, &req) != end) { return ""; }
+  match (http_header(&req.headers[0], req.nheaders, name)) {
+    case Some(v): { return v; }
+    case None: { return ""; }
+  }
+}
+
+// The request line target of the i-th request.
+export fn srv_log_target(i: int32) -> string {
+  var req: HttpRequest;
+  var h: string = srv_head(i);
+  var end: int64 = http_find_head_end(h.chars, (int64)h.length);
+  if (end <= 0) { return ""; }
+  h.length = (uint64)end;
+  if (http_parse_request(h, &req) != end) { return ""; }
+  return req.target;
+}
+
+export fn srv_log_verb(i: int32) -> string {
+  var req: HttpRequest;
+  var h: string = srv_head(i);
+  var end: int64 = http_find_head_end(h.chars, (int64)h.length);
+  if (end <= 0) { return ""; }
+  h.length = (uint64)end;
+  if (http_parse_request(h, &req) != end) { return ""; }
+  return req.verb;
+}

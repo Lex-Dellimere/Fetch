@@ -1,0 +1,7 @@
+// The facade: import "http/http" brings in the whole client.
+import "http/stream";
+import "http/pool";
+import "http/cookie";
+import "http/redirect";
+import "http/tls";
+import "http/client";
