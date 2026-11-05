@@ -1,0 +1,118 @@
+// The idle connection pool with real sockets: order, caps, timeout and
+// connections the peer has closed.
+import "http/pool";
+import "http/stream";
+import "std/socket";
+import "std/thread";
+import "std/core";
+import "tutil";
+
+var g_listen: int64 = -1;
+var g_port: int32 = 0;
+
+fn dial(key: string, uses: int32) -> HttpConn* {
+  var fd: int64 = -1;
+  match (tcp_connect("127.0.0.1", g_port, (int64)2000)) {
+    case Ok(s): { fd = s; }
+    case Err(e): { fd = -1; }
+  }
+  var c: HttpConn* = http_conn_new(http_stream_plain(fd), key);
+  c->uses = uses;
+  return c;
+}
+
+fn listen_again() {
+  if (g_listen >= 0) { sock_close(g_listen); }
+  var any: NetAddr = net_addr_loopback(NET_IPV4, 0);
+  match (tcp_listen(&any, 64)) {
+    case Ok(fd): { g_listen = fd; }
+    case Err(e): { g_listen = -1; }
+  }
+  var bound: NetAddr;
+  sock_local_addr(g_listen, &bound);
+  g_port = bound.port;
+}
+
+fn main() -> int32 {
+  listen_again();
+
+  var p: HttpPool;
+  http_pool_init(&p);
+  t_ok("defaults", p.max_idle_per_host > 0 && p.max_idle_total >= p.max_idle_per_host && p.idle_timeout_ms > 0);
+
+  // newest first
+  p.max_idle_per_host = 2;
+  http_pool_put(&p, dial("http://a:80", 1));
+  http_pool_put(&p, dial("http://a:80", 2));
+  http_pool_put(&p, dial("http://a:80", 3));
+  t_eq("per host cap", (int64)http_pool_count_key(&p, "http://a:80"), 2);
+  var c: HttpConn* = http_pool_take(&p, "http://a:80");
+  t_ok("newest first", c != (HttpConn*)0 && c->uses == 3);
+  http_conn_close(c);
+  c = http_pool_take(&p, "http://a:80");
+  t_ok("the oldest was closed", c != (HttpConn*)0 && c->uses == 2);
+  http_conn_close(c);
+  t_ok("empty", http_pool_take(&p, "http://a:80") == (HttpConn*)0);
+  t_eq("count", (int64)http_pool_count(&p), 0);
+
+  // keys are separate
+  http_pool_put(&p, dial("http://a:80", 1));
+  http_pool_put(&p, dial("https://a:443", 2));
+  http_pool_put(&p, dial("http://a:8080", 3));
+  t_ok("other port", http_pool_take(&p, "http://a:81") == (HttpConn*)0);
+  c = http_pool_take(&p, "https://a:443");
+  t_ok("scheme and port", c != (HttpConn*)0 && c->uses == 2);
+  http_conn_close(c);
+
+  // total cap drops the oldest overall
+  http_pool_close_all(&p);
+  p.max_idle_total = 3;
+  http_pool_put(&p, dial("http://a:1", 1));
+  http_pool_put(&p, dial("http://b:1", 2));
+  http_pool_put(&p, dial("http://c:1", 3));
+  http_pool_put(&p, dial("http://d:1", 4));
+  t_eq("total cap", (int64)http_pool_count(&p), 3);
+  t_eq("oldest is gone", (int64)http_pool_count_key(&p, "http://a:1"), 0);
+  t_eq("newest stays", (int64)http_pool_count_key(&p, "http://d:1"), 1);
+
+  // idle timeout
+  http_pool_close_all(&p);
+  p.idle_timeout_ms = 60;
+  http_pool_put(&p, dial("http://a:1", 1));
+  thread_sleep_ms((uint32)30);
+  http_pool_put(&p, dial("http://a:1", 2));
+  thread_sleep_ms((uint32)50);
+  http_pool_prune(&p);
+  t_eq("only the older timed out", (int64)http_pool_count(&p), 1);
+  thread_sleep_ms((uint32)100);
+  t_ok("take prunes", http_pool_take(&p, "http://a:1") == (HttpConn*)0);
+  t_eq("none left", (int64)http_pool_count(&p), 0);
+
+  // a connection the peer closed is not handed out
+  p.idle_timeout_ms = 30000;
+  listen_again();
+  var live: HttpConn* = dial("http://z:1", 1);
+  var s1: int64 = sock_accept(g_listen, (NetAddr*)0);
+  http_pool_put(&p, live);
+  sock_close(s1);
+  thread_sleep_ms((uint32)50);
+  t_ok("closed by peer", http_pool_take(&p, "http://z:1") == (HttpConn*)0);
+  t_eq("and dropped", (int64)http_pool_count(&p), 0);
+
+  var fresh: HttpConn* = dial("http://z:1", 1);
+  var s2: int64 = sock_accept(g_listen, (NetAddr*)0);
+  http_pool_put(&p, fresh);
+  c = http_pool_take(&p, "http://z:1");
+  t_ok("a quiet connection is handed out", c != (HttpConn*)0);
+  http_conn_close(c);
+  sock_close(s2);
+
+  // setting the caps to 0 keeps nothing
+  p.max_idle_per_host = 0;
+  http_pool_put(&p, dial("http://a:1", 1));
+  t_eq("keeps nothing", (int64)http_pool_count(&p), 0);
+
+  http_pool_close_all(&p);
+  sock_close(g_listen);
+  return t_done("pool");
+}

@@ -1,0 +1,157 @@
+// Idle keep-alive connections, kept per key (scheme, host and port).
+
+import "std/mem";
+import "std/socket";
+import "http/stream";
+
+export struct HttpConn {
+  stream: HttpStream;
+  key: string;            // owned
+  idle_since: int64;      // net_now_ms when it went idle
+  next: HttpConn*;
+  uses: int32;            // requests answered on it so far
+}
+
+export struct HttpPool {
+  head: HttpConn*;        // newest first
+  count: int32;
+  max_idle_per_host: int32;
+  max_idle_total: int32;
+  idle_timeout_ms: int64;
+}
+
+export fn http_pool_init(p: HttpPool*) {
+  memset(p, 0, (int64)sizeof(HttpPool));
+  p->max_idle_per_host = 4;
+  p->max_idle_total = 32;
+  p->idle_timeout_ms = 30000;
+}
+
+// Wraps a stream. The key text is copied. Returns 0 when out of memory.
+export fn http_conn_new(s: HttpStream, key: string) -> HttpConn* {
+  var c: HttpConn* = (HttpConn*)malloc((int64)sizeof(HttpConn));
+  if (c == 0) { return (HttpConn*)0; }
+  memset(c, 0, (int64)sizeof(HttpConn));
+  var k: uint8* = (uint8*)malloc((int64)key.length + 1);
+  if (k == 0) {
+    free(c);
+    return (HttpConn*)0;
+  }
+  memcpy(k, key.chars, (int64)key.length);
+  k[key.length] = (uint8)0;
+  c->key.chars = k;
+  c->key.length = key.length;
+  c->stream = s;
+  return c;
+}
+
+// Closes the stream and frees the connection.
+export fn http_conn_close(c: HttpConn*) {
+  http_stream_close(&c->stream);
+  free(c->key.chars);
+  free(c);
+}
+
+fn pl_unlink(p: HttpPool*, c: HttpConn*) {
+  if (p->head == c) {
+    p->head = c->next;
+  } else {
+    var q: HttpConn* = p->head;
+    while (q != 0 && q->next != c) { q = q->next; }
+    if (q != 0) { q->next = c->next; }
+  }
+  c->next = (HttpConn*)0;
+  p->count = p->count - 1;
+}
+
+fn pl_oldest(p: HttpPool*, key: string, any: bool) -> HttpConn* {
+  var best: HttpConn* = (HttpConn*)0;
+  var q: HttpConn* = p->head;
+  while (q != 0) {
+    if (any || q->key == key) { best = q; }
+    q = q->next;
+  }
+  return best;
+}
+
+fn pl_count_key(p: HttpPool*, key: string) -> int32 {
+  var n: int32 = 0;
+  var q: HttpConn* = p->head;
+  while (q != 0) {
+    if (q->key == key) { n = n + 1; }
+    q = q->next;
+  }
+  return n;
+}
+
+// Closes the connections idle for longer than the timeout.
+export fn http_pool_prune(p: HttpPool*) {
+  var now: int64 = net_now_ms();
+  var q: HttpConn* = p->head;
+  while (q != 0) {
+    var next: HttpConn* = q->next;
+    if (now - q->idle_since > p->idle_timeout_ms) {
+      pl_unlink(p, q);
+      http_conn_close(q);
+    }
+    q = next;
+  }
+}
+
+// An idle connection for key, newest first, or 0. One the server has closed
+// or written to since is dropped: the socket is readable then.
+export fn http_pool_take(p: HttpPool*, key: string) -> HttpConn* {
+  http_pool_prune(p);
+  var q: HttpConn* = p->head;
+  while (q != 0) {
+    var next: HttpConn* = q->next;
+    if (q->key == key) {
+      pl_unlink(p, q);
+      var dead: bool = false;
+      if (q->stream.fd >= 0 && sock_wait(q->stream.fd, NET_POLL_IN, 0) != 0) { dead = true; }
+      if (!dead) { return q; }
+      http_conn_close(q);
+    }
+    q = next;
+  }
+  return (HttpConn*)0;
+}
+
+// Keeps c for reuse, or closes it when the pool is full. The oldest idle
+// connection of the host goes first, then the oldest overall.
+export fn http_pool_put(p: HttpPool*, c: HttpConn*) {
+  if (p->max_idle_per_host <= 0 || p->max_idle_total <= 0) {
+    http_conn_close(c);
+    return;
+  }
+  c->idle_since = net_now_ms();
+  c->next = p->head;
+  p->head = c;
+  p->count = p->count + 1;
+  while (pl_count_key(p, c->key) > p->max_idle_per_host) {
+    var old: HttpConn* = pl_oldest(p, c->key, false);
+    pl_unlink(p, old);
+    http_conn_close(old);
+  }
+  while (p->count > p->max_idle_total) {
+    var old2: HttpConn* = pl_oldest(p, c->key, true);
+    pl_unlink(p, old2);
+    http_conn_close(old2);
+  }
+}
+
+export fn http_pool_close_all(p: HttpPool*) {
+  while (p->head != 0) {
+    var c: HttpConn* = p->head;
+    pl_unlink(p, c);
+    http_conn_close(c);
+  }
+}
+
+export fn http_pool_count(p: HttpPool*) -> int32 {
+  return p->count;
+}
+
+export fn http_pool_count_key(p: HttpPool*, key: string) -> int32 {
+  return pl_count_key(p, key);
+}

@@ -1,0 +1,89 @@
+// Redirect rules and Location resolution.
+import "http/redirect";
+import "std/http";
+import "std/arena";
+import "std/strbuf";
+import "tutil";
+
+fn resolve(base: string, loc: string) -> string {
+  var a: Arena* = arena_init((int64)0);
+  var u: HttpUrl;
+  if (http_url_parse(base, &u) != 0) { return "bad base"; }
+  var sb: StrBuf* = strbuf_new(a, 64);
+  var rc: int64 = http_url_resolve(a, &u, loc, sb);
+  var out: string = "error";
+  if (rc == 0) { out = "" + strbuf_finish_string(sb); }
+  arena_free(a);
+  return out;
+}
+
+fn main() -> int32 {
+  t_ok("follows", http_redirect_follows(301) && http_redirect_follows(302) && http_redirect_follows(303) && http_redirect_follows(307) && http_redirect_follows(308));
+  t_ok("does not follow", !http_redirect_follows(200) && !http_redirect_follows(300) && !http_redirect_follows(304) && !http_redirect_follows(305) && !http_redirect_follows(404));
+
+  t_str("303 POST", http_redirect_method(303, "POST"), "GET");
+  t_str("303 PUT", http_redirect_method(303, "PUT"), "GET");
+  t_str("303 HEAD", http_redirect_method(303, "HEAD"), "HEAD");
+  t_str("301 POST", http_redirect_method(301, "POST"), "GET");
+  t_str("302 POST", http_redirect_method(302, "POST"), "GET");
+  t_str("301 PUT", http_redirect_method(301, "PUT"), "PUT");
+  t_str("302 DELETE", http_redirect_method(302, "DELETE"), "DELETE");
+  t_str("307 POST", http_redirect_method(307, "POST"), "POST");
+  t_str("308 PUT", http_redirect_method(308, "PUT"), "PUT");
+  t_ok("303 drops body", !http_redirect_keeps_body(303, "POST"));
+  t_ok("302 POST drops body", !http_redirect_keeps_body(302, "POST"));
+  t_ok("301 PUT keeps body", http_redirect_keeps_body(301, "PUT"));
+  t_ok("307 keeps body", http_redirect_keeps_body(307, "POST"));
+  t_ok("308 keeps body", http_redirect_keeps_body(308, "POST"));
+
+  var h: HttpHeader[5];
+  h[0].name = "Authorization"; h[0].value = "Bearer x";
+  h[1].name = "cookie"; h[1].value = "a=b";
+  h[2].name = "X-Keep"; h[2].value = "1";
+  h[3].name = "Content-Type"; h[3].value = "text/plain";
+  h[4].name = "Accept"; h[4].value = "*/*";
+  var o: HttpHeader[5];
+  t_eq("keep all", (int64)http_redirect_headers(&h[0], 5, &o[0], false, false), 5);
+  t_eq("drop auth", (int64)http_redirect_headers(&h[0], 5, &o[0], true, false), 3);
+  t_ok("drop auth names", o[0].name == "X-Keep" && o[1].name == "Content-Type" && o[2].name == "Accept");
+  t_eq("drop body headers", (int64)http_redirect_headers(&h[0], 5, &o[0], false, true), 4);
+  t_eq("drop both", (int64)http_redirect_headers(&h[0], 5, &o[0], true, true), 2);
+
+  var a: HttpUrl;
+  var b: HttpUrl;
+  http_url_parse("http://Example.com/x", &a);
+  http_url_parse("http://example.COM/y?z", &b);
+  t_ok("same host", http_url_same_host(&a, &b));
+  http_url_parse("http://example.com:8080/x", &b);
+  t_ok("other port", !http_url_same_host(&a, &b));
+  http_url_parse("http://www.example.com/x", &b);
+  t_ok("other host", !http_url_same_host(&a, &b));
+
+  var base: string = "http://h.test/a/b/c.html?x=1#frag";
+  t_str("absolute", resolve(base, "https://other.test/p?q=1#f"), "https://other.test/p?q=1");
+  t_str("scheme relative", resolve(base, "//cdn.test/lib.js"), "http://cdn.test/lib.js");
+  t_str("scheme relative tls", resolve("https://h.test/a", "//cdn.test/lib.js"), "https://cdn.test/lib.js");
+  t_str("absolute path", resolve(base, "/top?y=2"), "http://h.test/top?y=2");
+  t_str("sibling", resolve(base, "d.html"), "http://h.test/a/b/d.html");
+  t_str("child dir", resolve(base, "sub/e"), "http://h.test/a/b/sub/e");
+  t_str("parent", resolve(base, "../up"), "http://h.test/a/up");
+  t_str("two up", resolve(base, "../../up2"), "http://h.test/up2");
+  t_str("above the root", resolve(base, "../../../../up3"), "http://h.test/up3");
+  t_str("dot", resolve(base, "./same"), "http://h.test/a/b/same");
+  t_str("dot slash inside", resolve(base, "x/./y/../z"), "http://h.test/a/b/x/z");
+  t_str("trailing dots", resolve(base, "x/.."), "http://h.test/a/b/");
+  t_str("trailing dot", resolve(base, "."), "http://h.test/a/b/");
+  t_str("query only", resolve(base, "?n=2"), "http://h.test/a/b/c.html?n=2");
+  t_str("fragment dropped", resolve(base, "/p#frag"), "http://h.test/p");
+  t_str("spaces trimmed", resolve(base, "  /p  "), "http://h.test/p");
+  t_str("port kept", resolve("http://h.test:8080/a/b", "c"), "http://h.test:8080/a/c");
+  t_str("default port dropped", resolve("https://h.test:443/a/b", "c"), "https://h.test/a/c");
+  t_str("ipv6", resolve("http://[::1]:9000/a/b", "/c"), "http://[::1]:9000/c");
+  t_str("root base", resolve("http://h.test", "x"), "http://h.test/x");
+  t_str("empty", resolve(base, ""), "error");
+  t_str("other scheme", resolve(base, "ftp://h.test/x"), "error");
+  t_str("javascript", resolve(base, "javascript:alert(1)"), "error");
+  t_str("colon in a later segment", resolve(base, "d/e:f"), "http://h.test/a/b/d/e:f");
+
+  return t_done("redirect");
+}
